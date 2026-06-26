@@ -42,8 +42,8 @@ impl Download {
     ///
     /// The scheduler/worker aborts the in-flight HTTP request and deletes any partially
     /// written file. Cancellation is best-effort and may race with completion.
-    pub fn cancel(&self) {
-        let _ = self.cmd_tx.send(SchedulerCmd::Cancel { id: self.id });
+    pub async fn cancel(&self) {
+        let _ = self.cmd_tx.send(SchedulerCmd::Cancel { id: self.id }).await;
     }
 
     /// Stream of [DownloadEvent] values scoped to this download only.

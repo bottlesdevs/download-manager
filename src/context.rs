@@ -30,8 +30,6 @@ pub(crate) struct Context {
     pub id_counter: AtomicU64,
     /// Number of currently active (running) downloads.
     pub active: AtomicUsize,
-    /// Configured maximum concurrency. Not automatically updated if semaphore changes.
-    pub max_concurrent: AtomicUsize,
 
     /// Global [DownloadEvent] broadcaster (buffered). Slow subscribers may miss events.
     pub events: EventBus,
@@ -42,10 +40,9 @@ impl Context {
     /// - Initializes the semaphore with `max_concurrent` permits.
     /// - Creates a root [CancellationToken] and a broadcast channel (capacity 1024).
     /// - Constructs a shared [reqwest::Client].
-    pub fn new(config: DownloadManagerConfig, cancel_root: CancellationToken) -> Arc<Self> {
+    pub fn new(config: &DownloadManagerConfig, cancel_root: CancellationToken) -> Arc<Self> {
         let ctx = Arc::new(Self {
             semaphore: Arc::new(Semaphore::new(config.max_concurrent)),
-            max_concurrent: AtomicUsize::new(config.max_concurrent),
             cancel_root,
             active: AtomicUsize::new(0),
             id_counter: AtomicU64::new(1),

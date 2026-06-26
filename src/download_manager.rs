@@ -67,7 +67,7 @@ impl DownloadManager {
         let (cmd_tx, cmd_rx) = mpsc::channel(1024);
         let tracker = TaskTracker::new();
         let shutdown_token = CancellationToken::new();
-        let ctx = Context::new(config, shutdown_token.child_token());
+        let ctx = Context::new(&config, shutdown_token.child_token());
         let scheduler =
             Scheduler::new(shutdown_token.clone(), ctx.clone(), tracker.clone(), cmd_rx);
 
@@ -79,9 +79,8 @@ impl DownloadManager {
         };
 
         tracker.spawn(async move { scheduler.run().await });
-        let max = ctx.max_concurrent.load(Ordering::Relaxed);
         info!(
-            max_concurrent = max,
+            max_concurrent = config.max_concurrent,
             "DownloadManager initialized and scheduler started"
         );
 

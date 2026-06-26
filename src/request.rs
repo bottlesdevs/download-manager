@@ -1,13 +1,10 @@
-use crate::{Download, DownloadManager, Event, error::DownloadError, scheduler::SchedulerCmd};
 use derive_builder::Builder;
 use reqwest::{
     Url,
     header::{HeaderMap, IntoHeaderName},
 };
 use std::path::{Path, PathBuf};
-use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, instrument};
+use tracing::instrument;
 use uuid::Uuid;
 
 /// Immutable description of a single download request.
@@ -23,17 +20,10 @@ pub struct Request {
     id: Uuid,
     #[builder(setter(custom))]
     url: Url,
-    #[builder(setter(into))]
+    #[builder(field(ty = "PathBuf"))]
     destination: PathBuf,
     #[builder(field(ty = "DownloadConfigBuilder"))]
     config: DownloadConfig,
-
-    events: broadcast::Sender<Event>,
-
-    #[builder(field(ty = "CancellationToken"), setter(custom))]
-    _cancel_token: (),
-    #[builder(field(ty = "Option<mpsc::Sender<SchedulerCmd>>"), setter(custom))]
-    _sched_tx: (),
 }
 
 /// Per-request configuration for retries, overwrite behavior, and headers.
@@ -80,22 +70,19 @@ impl DownloadConfig {
         self.overwrite
     }
 
-    /// Additional headers applied to both the HEAD probe and the GET request.
+    /// Additional headers applied startto both the HEAD probe and the GET request.
     pub fn headers(&self) -> &HeaderMap {
         &self.headers
     }
 }
 
 impl Request {
-    pub fn builder(manager: &DownloadManager, url: Url) -> RequestBuilder {
+    pub fn builder(url: Url, destination: impl AsRef<Path>) -> RequestBuilder {
         RequestBuilder {
             id: Uuid::new_v4(),
             url: Some(url),
-            destination: None,
+            destination: destination.as_ref().to_path_buf(),
             config: DownloadConfigBuilder::default(),
-            events: Some(manager.ctx.events.clone()),
-            _cancel_token: manager.child_token(),
-            _sched_tx: Some(manager.scheduler_tx.clone()),
         }
     }
 
@@ -143,43 +130,17 @@ impl RequestBuilder {
     }
 
     #[instrument(level = "info", skip(self))]
-    pub fn start(self) -> anyhow::Result<Download> {
-        let cancel_token = self._cancel_token;
-        if cancel_token.is_cancelled() {
-            return Err(DownloadError::ManagerShutdown.into());
-        }
-
+    pub fn build(self) -> anyhow::Result<Request> {
+        let id = self.id;
         let url = self.url.ok_or_else(|| anyhow::anyhow!("URL must be set"))?;
-        let destination = self
-            .destination
-            .ok_or_else(|| anyhow::anyhow!("Destination must be set"))?;
+        let destination = self.destination;
         let config = self.config.build()?;
 
-        let (result_tx, result_rx) = oneshot::channel();
-        let events = self.events.unwrap();
-        let event_rx = events.subscribe();
-        let id = self.id;
-
-        let request = Request {
+        Ok(Request {
             id,
             url: url.clone(),
             destination: destination.clone(),
             config,
-
-            events,
-
-            _cancel_token: (),
-            _sched_tx: (),
-        };
-
-        let sched_tx = self._sched_tx.expect("sched_tx must be set");
-        debug!(id = %id, url = %url, destination = ?destination, "Enqueuing download request");
-        sched_tx.try_send(SchedulerCmd::Enqueue {
-            request,
-            result_tx,
-            cancel_token: cancel_token.clone(),
-        })?;
-
-        Ok(Download::new(id, event_rx, result_rx, cancel_token))
+        })
     }
 }

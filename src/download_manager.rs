@@ -28,7 +28,7 @@ use std::{
     path::Path,
     sync::{Arc, atomic::Ordering},
 };
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, info, instrument, trace, warn};
@@ -95,17 +95,30 @@ impl DownloadManager {
     /// - Cancellation: call [Download::cancel()] on the handle, or [DownloadManager::cancel(id)].
     #[instrument(level = "info", skip(self, destination), fields(url = %url))]
     pub fn download(&self, url: Url, destination: impl AsRef<Path>) -> anyhow::Result<Download> {
-        self.download_builder(url)
-            .destination(destination.as_ref())
-            .start()
+        let request = self.download_builder(url, destination).build()?;
+        self.enqueue(request)
+    }
+
+    fn enqueue(&self, request: Request) -> anyhow::Result<Download> {
+        let id = request.id();
+        let event_rx = self.ctx.events.subscribe();
+        let (result_tx, result_rx) = oneshot::channel();
+        let cancel_token = self.ctx.child_token();
+
+        self.scheduler_tx.try_send(SchedulerCmd::Enqueue {
+            request,
+            result_tx,
+            cancel_token: cancel_token.clone(),
+        })?;
+
+        Ok(Download::new(id, event_rx, result_rx, cancel_token))
     }
 
     /// Create a [RequestBuilder] to customize a download (headers, retries, overwrite, callbacks).
     ///
     /// Use this if you need non-default behavior or want to hook into progress/event callbacks before start().
-    #[instrument(level = "debug", skip(self))]
-    pub fn download_builder(&self, url: Url) -> RequestBuilder {
-        Request::builder(self, url)
+    pub fn download_builder(&self, url: Url, destination: impl AsRef<Path>) -> RequestBuilder {
+        Request::builder(url, destination)
     }
 
     /// Best-effort attempt to request cancellation for a download by ID.

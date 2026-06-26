@@ -94,8 +94,7 @@ impl DownloadManager {
     /// - Cancellation: call [Download::cancel()] on the handle, or [DownloadManager::cancel(id)].
     #[instrument(level = "info", skip(self, destination), fields(url = %url))]
     pub fn download(&self, url: Url, destination: impl AsRef<Path>) -> anyhow::Result<Download> {
-        self.download_builder()
-            .url(url)
+        self.download_builder(url)
             .destination(destination.as_ref())
             .start()
     }
@@ -104,8 +103,8 @@ impl DownloadManager {
     ///
     /// Use this if you need non-default behavior or want to hook into progress/event callbacks before start().
     #[instrument(level = "debug", skip(self))]
-    pub fn download_builder(&self) -> RequestBuilder {
-        Request::builder(self)
+    pub fn download_builder(&self, url: Url) -> RequestBuilder {
+        Request::builder(self, url)
     }
 
     /// Best-effort attempt to request cancellation for a download by ID.

@@ -7,10 +7,7 @@ use reqwest::{
     Url,
     header::{HeaderMap, IntoHeaderName},
 };
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, trace};
@@ -19,7 +16,7 @@ use uuid::Uuid;
 /// Immutable description of a single download request.
 ///
 /// Built by [RequestBuilder] and executed by the scheduler. Holds destination,
-/// headers, retry policy, and user callbacks. Most users should prefer creating
+/// headers and retry policy. Most users should prefer creating
 /// requests via [DownloadManager::download_builder()].
 #[derive(Clone, Builder)]
 #[builder(pattern = "owned")]
@@ -27,6 +24,7 @@ use uuid::Uuid;
 pub struct Request {
     #[builder(field(ty = "Uuid"))]
     id: Uuid,
+    #[builder(setter(custom))]
     url: Url,
     #[builder(setter(into))]
     destination: PathBuf,
@@ -35,17 +33,6 @@ pub struct Request {
 
     progress: watch::Sender<Progress>,
     events: EventBus,
-
-    #[builder(
-        field(ty = "Option<Arc<dyn Fn(Progress) + Send + Sync>>"),
-        setter(strip_option)
-    )]
-    pub(crate) on_progress: Option<Arc<dyn Fn(Progress) + Send + Sync>>,
-    #[builder(
-        field(ty = "Option<Arc<dyn Fn(Event) + Send + Sync>>"),
-        setter(strip_option)
-    )]
-    pub(crate) on_event: Option<Arc<dyn Fn(Event) + Send + Sync>>,
 
     pub cancel_token: CancellationToken,
 
@@ -104,15 +91,13 @@ impl DownloadConfig {
 }
 
 impl Request {
-    pub fn builder(manager: &DownloadManager) -> RequestBuilder {
+    pub fn builder(manager: &DownloadManager, url: Url) -> RequestBuilder {
         RequestBuilder {
             id: Uuid::new_v4(),
-            url: None,
+            url: Some(url),
             destination: None,
             config: DownloadConfigBuilder::default(),
             progress: None,
-            on_progress: None,
-            on_event: None,
             events: Some(manager.ctx.events.clone()),
             cancel_token: Some(manager.child_token()),
             _sched_tx: Some(manager.scheduler_tx.clone()),
@@ -138,14 +123,12 @@ impl Request {
     pub fn emit(&self, event: Event) {
         debug!(id = %self.id, event = %event, "Emitting event");
         self.events.send(event.clone());
-        self.on_event.as_ref().map(|cb| cb(event));
     }
 
     pub fn update_progress(&self, progress: Progress) {
         trace!(id = %self.id, "Updating progress");
         // TODO: Log the error
         let _ = self.progress.send(progress);
-        self.on_progress.as_ref().map(|cb| cb(progress));
     }
 }
 
@@ -199,9 +182,6 @@ impl RequestBuilder {
             url: url.clone(),
             destination: destination.clone(),
             config,
-
-            on_progress: self.on_progress,
-            on_event: self.on_event,
 
             events,
             progress: progress_tx,

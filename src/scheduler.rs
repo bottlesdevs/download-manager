@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::{
     DownloadError, DownloadResult, Event, Request,
     context::Context,
+    events::EventKind,
     worker::{WorkerMsg, run},
 };
 
@@ -84,11 +85,13 @@ impl Scheduler {
     fn schedule(&mut self, job: Job) {
         let request = &job.request;
         let id = job.id();
-        request.emit(Event::Queued {
+        request.emit(Event::new(
             id,
-            url: request.url().clone(),
-            destination: request.destination().to_path_buf(),
-        });
+            EventKind::Queued {
+                url: request.url().clone(),
+                destination: request.destination().to_path_buf(),
+            },
+        ));
         debug!(%id, url = %request.url(), destination = ?request.destination(), "Job queued");
         self.jobs.insert(id, job);
         self.ready.push_back(id);
@@ -121,7 +124,10 @@ impl Scheduler {
         match msg {
             WorkerMsg::Metadata { id, info } => {
                 if let Some(_) = self.jobs.get(&id) {
-                    let _ = self.ctx.events.send(Event::Probed { id, info });
+                    let _ = self
+                        .ctx
+                        .events
+                        .send(Event::new(id, EventKind::Probed { info }));
                 }
             }
             WorkerMsg::Progress {
@@ -132,11 +138,13 @@ impl Scheduler {
                 eta,
             } => {
                 if let Some(_) = self.jobs.get(&id) {
-                    let _ = self.ctx.events.send(Event::Progress {
+                    let _ = self.ctx.events.send(Event::new(
                         id,
-                        bytes_downloaded,
-                        total_bytes,
-                    });
+                        EventKind::Progress {
+                            bytes_downloaded,
+                            total_bytes,
+                        },
+                    ));
                 }
             }
             WorkerMsg::Finish { id, result } => match result {
@@ -259,33 +267,40 @@ impl Job {
     }
 
     fn fail(self, error: DownloadError) {
-        self.request.emit(Event::Failed {
-            id: self.id(),
-            error: error.to_string(),
-        });
+        self.request.emit(Event::new(
+            self.id(),
+            EventKind::Failed {
+                error: error.to_string(),
+            },
+        ));
         self.send_result(Err(error));
     }
 
     fn finish(self, result: DownloadResult) {
-        self.request.emit(Event::Completed {
-            id: self.id(),
-            path: result.path.clone(),
-            bytes_downloaded: result.bytes_downloaded,
-        });
+        self.request.emit(Event::new(
+            self.id(),
+            EventKind::Completed {
+                path: result.path.clone(),
+                bytes_downloaded: result.bytes_downloaded,
+            },
+        ));
         self.send_result(Ok(result))
     }
 
     fn retry(&self, delay: Duration) {
-        self.request.emit(Event::Retrying {
-            id: self.id(),
-            attempt: self.attempt,
-            next_delay_ms: delay.as_millis() as u64,
-        });
+        self.request.emit(Event::new(
+            self.id(),
+            EventKind::Retrying {
+                attempt: self.attempt,
+                next_delay_ms: delay.as_millis() as u64,
+            },
+        ));
     }
 
     fn cancel(self) {
         self.cancel_token.cancel();
-        self.request.emit(Event::Cancelled { id: self.id() });
+        self.request
+            .emit(Event::new(self.id(), EventKind::Cancelled));
         self.send_result(Err(DownloadError::Cancelled))
     }
 }

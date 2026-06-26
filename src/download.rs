@@ -58,20 +58,7 @@ impl Download {
         let download_id = self.id;
         BroadcastStream::new(self.events.resubscribe())
             .filter_map(|res| res.ok())
-            .filter(move |event| {
-                let matches = match event {
-                    Event::Queued { id, .. }
-                    | Event::Progress { id, .. }
-                    | Event::Probed { id, .. }
-                    | Event::Started { id, .. }
-                    | Event::Retrying { id, .. }
-                    | Event::Completed { id, .. }
-                    | Event::Failed { id, .. }
-                    | Event::Cancelled { id, .. } => *id == download_id,
-                };
-
-                matches
-            })
+            .filter(move |event| event.id() == download_id)
     }
 }
 

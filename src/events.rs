@@ -5,92 +5,92 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
-pub enum Event {
+pub struct Event {
+    id: Uuid,
+    kind: EventKind,
+}
+
+impl Event {
+    pub fn new(id: Uuid, kind: EventKind) -> Self {
+        Self { id, kind }
+    }
+
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
+    pub fn kind(&self) -> &EventKind {
+        &self.kind
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum EventKind {
     Queued {
-        id: Uuid,
         url: Url,
         destination: PathBuf,
     },
     Probed {
-        id: Uuid,
         info: RemoteInfo,
     },
     Progress {
-        id: Uuid,
         bytes_downloaded: u64,
         total_bytes: Option<u64>,
     },
     Started {
-        id: Uuid,
         url: Url,
         destination: PathBuf,
         total_bytes: Option<u64>,
     },
     Retrying {
-        id: Uuid,
         attempt: u32,
         next_delay_ms: u64,
     },
     Completed {
-        id: Uuid,
         path: PathBuf,
         bytes_downloaded: u64,
     },
     Failed {
-        id: Uuid,
         error: String,
     },
-    Cancelled {
-        id: Uuid,
-    },
+    Cancelled,
 }
 
 impl std::fmt::Display for Event {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}]: {}", self.id, self.kind)
+    }
+}
+
+impl std::fmt::Display for EventKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Event::Queued { id, .. } => write!(f, "[{}] Queued", id),
-            Event::Probed { id, info } => write!(f, "[{}] Probed: {:?}", id, info),
-            Event::Progress {
-                id,
+            EventKind::Queued { .. } => write!(f, "Queued"),
+            EventKind::Probed { info } => write!(f, "Probed: {:?}", info),
+            EventKind::Progress {
                 bytes_downloaded,
                 total_bytes,
-            } => write!(
-                f,
-                "[{}] Progress: {:?}:{:?}",
-                id, bytes_downloaded, total_bytes
-            ),
-            Event::Failed { id, error } => write!(f, "[{}] Failed: {}", id, error),
-            Event::Cancelled { id } => write!(f, "[{}] Cancelled", id),
-            Event::Started {
-                id, total_bytes, ..
-            } => {
+            } => write!(f, "Progress: {:?}:{:?}", bytes_downloaded, total_bytes),
+            EventKind::Failed { error } => write!(f, "Failed: {}", error),
+            EventKind::Cancelled => write!(f, "Cancelled"),
+            EventKind::Started { total_bytes, .. } => {
                 if let Some(total) = total_bytes {
-                    write!(f, "[{}] Started ({} bytes)", id, total)
+                    write!(f, "Started ({} bytes)", total)
                 } else {
-                    write!(f, "[{}] Started", id)
+                    write!(f, "Started")
                 }
             }
-            Event::Retrying {
-                id,
+            EventKind::Retrying {
                 attempt,
                 next_delay_ms,
             } => {
-                write!(
-                    f,
-                    "[{}] Retrying: attempt {} in {} ms",
-                    id, attempt, next_delay_ms
-                )
+                write!(f, "Retrying: attempt {} in {} ms", attempt, next_delay_ms)
             }
-            Event::Completed {
-                id,
+            EventKind::Completed {
                 path,
                 bytes_downloaded,
             } => {
-                write!(
-                    f,
-                    "[{}] Completed: {:?} ({} bytes)",
-                    id, path, bytes_downloaded
-                )
+                write!(f, "Completed: {:?} ({} bytes)", path, bytes_downloaded)
             }
         }
     }
@@ -133,21 +133,6 @@ impl Progress {
             min_sample_bytes: 64 * 1024, // 64 KiB
             min_sample_interval: Duration::from_millis(200),
         }
-    }
-
-    pub(crate) fn with_sample_interval(mut self, min_sample_interval: Duration) -> Self {
-        self.min_sample_interval = min_sample_interval;
-        self
-    }
-
-    pub(crate) fn with_sample_bytes(mut self, min_sample_bytes: u64) -> Self {
-        self.min_sample_bytes = min_sample_bytes;
-        self
-    }
-
-    pub(crate) fn with_ema_alpha(mut self, ema_alpha: f64) -> Self {
-        self.ema_alpha = ema_alpha;
-        self
     }
 
     pub fn bytes_downloaded(&self) -> u64 {

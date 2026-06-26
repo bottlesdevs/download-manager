@@ -1,4 +1,4 @@
-use crate::{DownloadManagerConfig, error::Result, events::Event};
+use crate::{error::Result, events::Event, manager::DownloadManagerConfig};
 use reqwest::Client;
 use std::sync::{
     Arc,

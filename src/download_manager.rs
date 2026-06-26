@@ -231,16 +231,3 @@ impl Default for DownloadManagerConfig {
         DownloadManagerConfigBuilder::default().build().unwrap()
     }
 }
-
-impl DownloadManagerConfigBuilder {
-    #[instrument(level = "debug", skip(self))]
-    fn max_concurrent(&mut self, value: usize) -> anyhow::Result<&mut Self> {
-        let value = (value != 0).then(|| value).ok_or(anyhow::anyhow!(
-            "Max concurrent downloads must be set and greater than 0"
-        ))?;
-
-        self.max_concurrent = Some(value);
-
-        Ok(self)
-    }
-}

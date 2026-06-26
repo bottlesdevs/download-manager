@@ -29,6 +29,7 @@ use std::{
     sync::{Arc, atomic::Ordering},
 };
 use tokio::sync::{broadcast, mpsc};
+use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, info, instrument, trace, warn};
 use uuid::Uuid;
@@ -182,7 +183,7 @@ impl DownloadManager {
     /// Internally wraps the broadcast receiver and filters out lagged/closed errors.
     #[instrument(level = "debug", skip(self))]
     pub fn events(&self) -> impl Stream<Item = Event> + 'static {
-        self.ctx.events.events()
+        BroadcastStream::new(self.ctx.events.subscribe()).filter_map(|r| r.ok())
     }
 
     /// Gracefully stop the manager.

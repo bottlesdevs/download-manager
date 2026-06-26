@@ -2,45 +2,7 @@ use crate::download::RemoteInfo;
 use reqwest::Url;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use tokio::sync::broadcast;
-use tracing::{debug, warn};
 use uuid::Uuid;
-
-#[derive(Debug, Clone)]
-pub(crate) struct EventBus(broadcast::Sender<Event>);
-
-impl EventBus {
-    pub fn new() -> Self {
-        let (tx, _rx) = broadcast::channel(1024);
-        EventBus(tx)
-    }
-
-    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
-        self.0.subscribe()
-    }
-
-    pub fn events(&self) -> impl tokio_stream::Stream<Item = Event> + 'static {
-        use tokio_stream::StreamExt as _;
-        use tokio_stream::wrappers::BroadcastStream;
-
-        debug!("Creating broadcast events stream");
-        BroadcastStream::new(self.subscribe()).filter_map(|res| match res {
-            Ok(event) => Some(event),
-            Err(e) => {
-                warn!(error = %e, "Event receiver lagged or closed; dropping event");
-                None
-            }
-        })
-    }
-
-    pub fn send(&self, event: Event) {
-        if let Err(e) = self.0.send(event.clone()) {
-            warn!(error = %e, event = %event, "Failed to publish event to broadcast channel");
-        } else {
-            debug!(event = %event, "Published event");
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub enum Event {

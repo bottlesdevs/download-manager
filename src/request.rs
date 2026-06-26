@@ -1,6 +1,5 @@
 use crate::{
-    Download, DownloadManager, Event, Progress, error::DownloadError, events::EventBus,
-    scheduler::SchedulerCmd,
+    Download, DownloadManager, Event, Progress, error::DownloadError, scheduler::SchedulerCmd,
 };
 use derive_builder::Builder;
 use reqwest::{
@@ -8,7 +7,7 @@ use reqwest::{
     header::{HeaderMap, IntoHeaderName},
 };
 use std::path::{Path, PathBuf};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, trace};
 use uuid::Uuid;
@@ -32,7 +31,7 @@ pub struct Request {
     config: DownloadConfig,
 
     progress: watch::Sender<Progress>,
-    events: EventBus,
+    events: broadcast::Sender<Event>,
 
     #[builder(field(ty = "CancellationToken"), setter(custom))]
     _cancel_token: (),

@@ -1,16 +1,13 @@
 use reqwest::Client;
-use std::{
-    any,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
 };
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, broadcast};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::{DownloadManagerConfig, events::EventBus};
+use crate::{DownloadManagerConfig, events::Event};
 
 /// Shared runtime context for coordinating downloads. Internal to the crate.
 /// Holds the concurrency semaphore, root cancellation token, HTTP client,
@@ -30,7 +27,7 @@ pub(crate) struct Context {
     pub active: AtomicUsize,
 
     /// Global [DownloadEvent] broadcaster (buffered). Slow subscribers may miss events.
-    pub events: EventBus,
+    pub events: broadcast::Sender<Event>,
 }
 
 impl Context {
@@ -39,12 +36,13 @@ impl Context {
     /// - Creates a root [CancellationToken] and a broadcast channel (capacity 1024).
     /// - Constructs a shared [reqwest::Client].
     pub fn new(config: &DownloadManagerConfig, cancel_root: CancellationToken) -> Arc<Self> {
+        let (tx, _rx) = broadcast::channel(1024);
         let ctx = Arc::new(Self {
             semaphore: Arc::new(Semaphore::new(config.max_concurrent)),
             cancel_root,
             active: AtomicUsize::new(0),
             client: Client::new(),
-            events: EventBus::new(),
+            events: tx,
         });
         info!(
             max_concurrent = config.max_concurrent,

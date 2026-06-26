@@ -119,6 +119,11 @@ impl Scheduler {
     #[instrument(level = "debug", skip(self, msg))]
     async fn handle_worker_msg(&mut self, msg: WorkerMsg) {
         match msg {
+            WorkerMsg::Metadata { id, info } => {
+                if let Some(_) = self.jobs.get(&id) {
+                    let _ = self.ctx.events.send(Event::Probed { id, info });
+                }
+            }
             WorkerMsg::Finish { id, result } => match result {
                 Ok(result) => {
                     let Some(job) = self.jobs.remove(&id) else {

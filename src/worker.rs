@@ -16,6 +16,10 @@ use crate::{
 };
 
 pub(crate) enum WorkerMsg {
+    Metadata {
+        id: Uuid,
+        info: RemoteInfo,
+    },
     Finish {
         id: Uuid,
         result: Result<DownloadResult, DownloadError>,
@@ -29,7 +33,13 @@ pub(crate) async fn run(
     worker_tx: mpsc::Sender<WorkerMsg>,
     cancel_token: CancellationToken,
 ) {
-    let result = attempt_download(request.as_ref(), ctx.client.clone(), cancel_token).await;
+    let result = attempt_download(
+        request.as_ref(),
+        ctx.client.clone(),
+        cancel_token,
+        worker_tx.clone(),
+    )
+    .await;
     if result.is_ok() {
         info!(id = %request.id(), "Download attempt finished successfully");
     } else {
@@ -96,9 +106,10 @@ pub(crate) async fn attempt_download(
     request: &Request,
     client: Client,
     cancel_token: CancellationToken,
+    worker_tx: mpsc::Sender<WorkerMsg>,
 ) -> Result<DownloadResult, DownloadError> {
     if let Some(info) = probe_head(request, &client, cancel_token.clone()).await {
-        request.emit(Event::Probed {
+        worker_tx.send(WorkerMsg::Metadata {
             id: request.id(),
             info,
         });

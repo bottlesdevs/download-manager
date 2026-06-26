@@ -1,9 +1,8 @@
-use crate::{DownloadError, Event};
+use crate::{DownloadError, Event, scheduler::SchedulerCmd};
 use futures_core::Stream;
 use std::path::PathBuf;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_stream::wrappers::BroadcastStream;
-use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 /// Handle for a single download scheduled by DownloadManager.
@@ -16,8 +15,7 @@ pub struct Download {
     id: Uuid,
     events: broadcast::Receiver<Event>,
     result: oneshot::Receiver<Result<DownloadResult, DownloadError>>,
-
-    cancel_token: CancellationToken,
+    cmd_tx: mpsc::Sender<SchedulerCmd>,
 }
 
 impl Download {
@@ -25,13 +23,13 @@ impl Download {
         id: Uuid,
         events: broadcast::Receiver<Event>,
         result: oneshot::Receiver<Result<DownloadResult, DownloadError>>,
-        cancel_token: CancellationToken,
+        cmd_tx: mpsc::Sender<SchedulerCmd>,
     ) -> Self {
         Download {
             id,
             events,
             result,
-            cancel_token,
+            cmd_tx,
         }
     }
 
@@ -45,7 +43,7 @@ impl Download {
     /// The scheduler/worker aborts the in-flight HTTP request and deletes any partially
     /// written file. Cancellation is best-effort and may race with completion.
     pub fn cancel(&self) {
-        self.cancel_token.cancel();
+        let _ = self.cmd_tx.send(SchedulerCmd::Cancel { id: self.id });
     }
 
     /// Stream of [DownloadEvent] values scoped to this download only.

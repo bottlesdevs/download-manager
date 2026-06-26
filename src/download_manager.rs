@@ -111,7 +111,12 @@ impl DownloadManager {
             cancel_token: cancel_token.clone(),
         })?;
 
-        Ok(Download::new(id, event_rx, result_rx, cancel_token))
+        Ok(Download::new(
+            id,
+            event_rx,
+            result_rx,
+            self.scheduler_tx.clone(),
+        ))
     }
 
     /// Create a [RequestBuilder] to customize a download (headers, retries, overwrite, callbacks).

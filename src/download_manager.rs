@@ -10,7 +10,7 @@ pub mod prelude {
     pub use crate::{
         download::{Download, DownloadResult},
         error::DownloadError,
-        events::{Event, Progress},
+        events::{Event, ProgressTracker},
         request::Request,
     };
 }

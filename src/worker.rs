@@ -7,7 +7,7 @@ use tracing::{debug, error, info, instrument, trace, warn};
 use uuid::Uuid;
 
 use crate::{
-    download::RemoteInfo, error::DownloadError, events::Progress, prelude::DownloadResult,
+    download::RemoteInfo, error::DownloadError, events::ProgressTracker, prelude::DownloadResult,
     request::Request,
 };
 
@@ -137,7 +137,7 @@ pub(crate) async fn attempt_download(
     debug!(total_bytes = ?total_bytes, "Server accepted download");
 
     let mut file = File::create(request.destination()).await?;
-    let mut progress = Progress::new(total_bytes);
+    let mut progress = ProgressTracker::new(0, total_bytes);
     loop {
         tokio::select! {
             _ = cancel_token.cancelled() => {
@@ -150,12 +150,12 @@ pub(crate) async fn attempt_download(
                 match chunk {
                     Ok(Some(chunk)) => {
                         file.write_all(&chunk).await?;
-                        if progress.update(chunk.len() as u64) {
+                        if progress.add(chunk.len() as u64) {
                             let _ = worker_tx.send(WorkerMsg::Progress {
                                 id: request.id(),
-                                bytes_downloaded: progress.bytes_downloaded(),
+                                bytes_downloaded: progress.bytes(),
                                 total_bytes,
-                                rate_bps: progress.ema_bps,
+                                rate_bps: progress.rate_bps(),
                                 eta: progress.eta()
                             })
                             .await;
@@ -177,17 +177,17 @@ pub(crate) async fn attempt_download(
     let _ = worker_tx
         .send(WorkerMsg::Progress {
             id: request.id(),
-            bytes_downloaded: progress.bytes_downloaded(),
+            bytes_downloaded: progress.bytes(),
             total_bytes,
-            rate_bps: progress.ema_bps,
+            rate_bps: progress.rate_bps(),
             eta: progress.eta(),
         })
         .await;
     file.sync_all().await?;
-    info!(destination = ?request.destination(), bytes = progress.bytes_downloaded(), "Download completed successfully");
+    info!(destination = ?request.destination(), bytes = progress.bytes(), "Download completed successfully");
 
     Ok(DownloadResult {
         path: request.destination().to_path_buf(),
-        bytes_downloaded: progress.bytes_downloaded(),
+        bytes_downloaded: progress.bytes(),
     })
 }

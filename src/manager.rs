@@ -1,26 +1,5 @@
-mod context;
-mod download;
-mod error;
-mod events;
-mod request;
-mod scheduler;
-mod worker;
-
-pub use crate::download::{Download, DownloadResult};
-pub use crate::error::{Error, Result};
-pub use crate::events::Event;
-pub use crate::request::Request;
-
-pub mod prelude {
-    pub use crate::{
-        download::{Download, DownloadResult},
-        error::{Error, Result},
-        events::{Event, ProgressTracker},
-        request::Request,
-    };
-}
-
 use crate::{
+    Download, Event, Request, Result,
     context::Context,
     request::RequestBuilder,
     scheduler::{Scheduler, SchedulerCmd},
@@ -226,7 +205,7 @@ impl DownloadManager {
 #[derive(Builder)]
 pub struct DownloadManagerConfig {
     #[builder(default = 3, setter(custom))]
-    max_concurrent: usize,
+    pub(crate) max_concurrent: usize,
 }
 
 impl Default for DownloadManagerConfig {

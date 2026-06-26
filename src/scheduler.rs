@@ -241,13 +241,13 @@ impl Scheduler {
 
             let request = job.request.clone();
             let cancel_token = job.cancel_token.clone();
-            let ctx = self.ctx.clone();
+            let client = self.ctx.client.clone();
             let worker_tx = self.worker_tx.clone();
 
             info!(%id, "Dispatching job to worker");
             self.tracker.spawn(async move {
                 let _guard = guard;
-                run(request, ctx, worker_tx, cancel_token).await;
+                run(request, client, worker_tx, cancel_token).await;
             });
         }
     }

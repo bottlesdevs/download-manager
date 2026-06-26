@@ -29,20 +29,14 @@ pub(crate) enum WorkerMsg {
     },
 }
 
-#[instrument(level = "info", skip(request, ctx, worker_tx), fields(id = %request.id(), url = %request.url()))]
+#[instrument(level = "info", skip(request, client, worker_tx, cancel_token), fields(id = %request.id(), url = %request.url()))]
 pub(crate) async fn run(
     request: Arc<Request>,
-    ctx: Arc<Context>,
+    client: Client,
     worker_tx: mpsc::Sender<WorkerMsg>,
     cancel_token: CancellationToken,
 ) {
-    let result = attempt_download(
-        request.as_ref(),
-        ctx.client.clone(),
-        cancel_token,
-        worker_tx.clone(),
-    )
-    .await;
+    let result = attempt_download(request.as_ref(), client, cancel_token, worker_tx.clone()).await;
     if result.is_ok() {
         info!(id = %request.id(), "Download attempt finished successfully");
     } else {
@@ -57,7 +51,7 @@ pub(crate) async fn run(
         .await;
 }
 
-#[instrument(level = "debug", skip(request, client), fields(id = %request.id(), url = %request.url()))]
+#[instrument(level = "debug", skip(request, client, cancel_token), fields(id = %request.id(), url = %request.url()))]
 pub(crate) async fn probe_head(
     request: &Request,
     client: &Client,
@@ -104,7 +98,7 @@ pub(crate) async fn probe_head(
     })
 }
 
-#[instrument(level = "info", skip(request, client), fields(id = %request.id(), url = %request.url(), destination = ?request.destination()))]
+#[instrument(level = "info", skip(request, client, cancel_token, worker_tx), fields(id = %request.id(), url = %request.url(), destination = ?request.destination()))]
 pub(crate) async fn attempt_download(
     request: &Request,
     client: Client,

@@ -5,7 +5,7 @@ use std::{
 };
 
 use futures_util::StreamExt;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::{sync::CancellationToken, task::TaskTracker, time::DelayQueue};
 use tracing::{debug, error, info, instrument, trace, warn};
 use uuid::Uuid;
@@ -85,7 +85,7 @@ impl Scheduler {
     fn schedule(&mut self, job: Job) {
         let request = &job.request;
         let id = job.id();
-        request.emit(Event::new(
+        let _ = self.ctx.events.send(Event::new(
             id,
             EventKind::Queued {
                 url: request.url().clone(),
@@ -116,7 +116,9 @@ impl Scheduler {
             self.try_dispatch();
         }
         info!("Cancelling remaining jobs");
-        self.jobs.drain().for_each(|(_, job)| job.cancel());
+        self.jobs
+            .drain()
+            .for_each(|(_, job)| job.cancel(self.ctx.events.clone()));
     }
 
     #[instrument(level = "debug", skip(self, msg))]
@@ -134,8 +136,7 @@ impl Scheduler {
                 id,
                 bytes_downloaded,
                 total_bytes,
-                rate_bps,
-                eta,
+                ..
             } => {
                 if let Some(_) = self.jobs.get(&id) {
                     let _ = self.ctx.events.send(Event::new(
@@ -153,14 +154,14 @@ impl Scheduler {
                         return;
                     };
                     info!(%id, "Job completed successfully");
-                    job.finish(result)
+                    job.finish(self.ctx.events.clone(), result)
                 }
                 Err(DownloadError::Cancelled) => {
                     let Some(job) = self.jobs.remove(&id) else {
                         return;
                     };
                     warn!(%id, "Job cancelled");
-                    job.cancel()
+                    job.cancel(self.ctx.events.clone())
                 }
                 Err(error) if error.is_retryable() => {
                     let Some(job) = self.jobs.get_mut(&id) else {
@@ -168,13 +169,15 @@ impl Scheduler {
                     };
                     if job.attempt >= job.request.config().retries() {
                         warn!(%id, attempt = job.attempt, retries = job.request.config().retries(), error = %error, "Retry limit exceeded; failing job");
-                        self.jobs.remove(&id).map(|job| job.fail(error));
+                        self.jobs
+                            .remove(&id)
+                            .map(|job| job.fail(self.ctx.events.clone(), error));
                         return;
                     }
                     let delay = BACKOFF_STRATEGY.next_delay(job.attempt);
                     job.attempt += 1;
                     warn!(%id, attempt = job.attempt, delay_ms = delay.as_millis(), error = %error, "Retryable error; scheduling retry");
-                    job.retry(delay);
+                    job.retry(self.ctx.events.clone(), delay);
                     self.delayed.insert(id, delay);
                 }
                 Err(error) => {
@@ -182,7 +185,7 @@ impl Scheduler {
                         return;
                     };
                     error!(%id, error = %error, "Job failed with non-retryable error");
-                    entry.fail(error)
+                    entry.fail(self.ctx.events.clone(), error)
                 }
             },
         }
@@ -207,7 +210,9 @@ impl Scheduler {
             }
             SchedulerCmd::Cancel { id } => {
                 info!(%id, "Received cancel command");
-                self.jobs.remove(&id).map(|job| job.cancel());
+                self.jobs
+                    .remove(&id)
+                    .map(|job| job.cancel(self.ctx.events.clone()));
             }
         }
     }
@@ -266,8 +271,8 @@ impl Job {
         }
     }
 
-    fn fail(self, error: DownloadError) {
-        self.request.emit(Event::new(
+    fn fail(self, event_tx: broadcast::Sender<Event>, error: DownloadError) {
+        let _ = event_tx.send(Event::new(
             self.id(),
             EventKind::Failed {
                 error: error.to_string(),
@@ -276,8 +281,8 @@ impl Job {
         self.send_result(Err(error));
     }
 
-    fn finish(self, result: DownloadResult) {
-        self.request.emit(Event::new(
+    fn finish(self, event_tx: broadcast::Sender<Event>, result: DownloadResult) {
+        let _ = event_tx.send(Event::new(
             self.id(),
             EventKind::Completed {
                 path: result.path.clone(),
@@ -287,8 +292,8 @@ impl Job {
         self.send_result(Ok(result))
     }
 
-    fn retry(&self, delay: Duration) {
-        self.request.emit(Event::new(
+    fn retry(&self, event_tx: broadcast::Sender<Event>, delay: Duration) {
+        let _ = event_tx.send(Event::new(
             self.id(),
             EventKind::Retrying {
                 attempt: self.attempt,
@@ -297,10 +302,9 @@ impl Job {
         ));
     }
 
-    fn cancel(self) {
+    fn cancel(self, event_tx: broadcast::Sender<Event>) {
         self.cancel_token.cancel();
-        self.request
-            .emit(Event::new(self.id(), EventKind::Cancelled));
+        let _ = event_tx.send(Event::new(self.id(), EventKind::Cancelled));
         self.send_result(Err(DownloadError::Cancelled))
     }
 }

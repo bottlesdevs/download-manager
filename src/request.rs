@@ -1,15 +1,13 @@
-use crate::{
-    Download, DownloadManager, Event, Progress, error::DownloadError, scheduler::SchedulerCmd,
-};
+use crate::{Download, DownloadManager, Event, error::DownloadError, scheduler::SchedulerCmd};
 use derive_builder::Builder;
 use reqwest::{
     Url,
     header::{HeaderMap, IntoHeaderName},
 };
 use std::path::{Path, PathBuf};
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, instrument, trace};
+use tracing::{debug, instrument};
 use uuid::Uuid;
 
 /// Immutable description of a single download request.
@@ -115,11 +113,6 @@ impl Request {
 
     pub fn config(&self) -> &DownloadConfig {
         &self.config
-    }
-
-    pub fn emit(&self, event: Event) {
-        debug!(id = %self.id, event = %event, "Emitting event");
-        self.events.send(event.clone());
     }
 }
 

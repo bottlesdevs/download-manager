@@ -7,12 +7,8 @@ use tracing::{debug, error, info, instrument, trace, warn};
 use uuid::Uuid;
 
 use crate::{
-    context::Context,
-    download::RemoteInfo,
-    error::DownloadError,
-    events::{Event, EventKind, Progress},
-    prelude::DownloadResult,
-    request::Request,
+    context::Context, download::RemoteInfo, error::DownloadError, events::Progress,
+    prelude::DownloadResult, request::Request,
 };
 
 pub(crate) enum WorkerMsg {
@@ -147,15 +143,6 @@ pub(crate) async fn attempt_download(
     debug!(total_bytes = ?total_bytes, "Server accepted download");
 
     let mut file = File::create(request.destination()).await?;
-    request.emit(Event::new(
-        request.id(),
-        EventKind::Started {
-            url: request.url().clone(),
-            destination: request.destination().to_path_buf(),
-            total_bytes,
-        },
-    ));
-
     let mut progress = Progress::new(total_bytes);
     loop {
         tokio::select! {

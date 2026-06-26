@@ -7,8 +7,8 @@ use tracing::{debug, error, info, instrument, trace, warn};
 use uuid::Uuid;
 
 use crate::{
-    context::Context, download::RemoteInfo, error::DownloadError, events::Progress,
-    prelude::DownloadResult, request::Request,
+    download::RemoteInfo, error::DownloadError, events::Progress, prelude::DownloadResult,
+    request::Request,
 };
 
 pub(crate) enum WorkerMsg {

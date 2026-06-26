@@ -11,7 +11,7 @@ use tracing::{debug, error, info, instrument, trace, warn};
 use uuid::Uuid;
 
 use crate::{
-    DownloadError, DownloadResult, Event, Request,
+    DownloadResult, Error, Event, Request,
     context::Context,
     events::{DownloadState, EventKind},
     worker::{WorkerMsg, run},
@@ -38,7 +38,7 @@ static BACKOFF_STRATEGY: ExponentialBackoff = ExponentialBackoff {
 pub(crate) enum SchedulerCmd {
     Enqueue {
         request: Request,
-        result_tx: oneshot::Sender<Result<DownloadResult, DownloadError>>,
+        result_tx: oneshot::Sender<Result<DownloadResult, Error>>,
         cancel_token: CancellationToken,
     },
     Cancel {
@@ -155,7 +155,7 @@ impl Scheduler {
                     info!(%id, "Job completed successfully");
                     job.finish(self.ctx.events.clone(), result)
                 }
-                Err(DownloadError::Cancelled) => {
+                Err(Error::Cancelled) => {
                     let Some(job) = self.jobs.remove(&id) else {
                         return;
                     };
@@ -255,7 +255,7 @@ impl Scheduler {
 pub(crate) struct Job {
     request: Arc<Request>,
     attempt: u32,
-    result: Option<oneshot::Sender<Result<DownloadResult, DownloadError>>>,
+    result: Option<oneshot::Sender<Result<DownloadResult, Error>>>,
     cancel_token: CancellationToken,
 }
 
@@ -264,13 +264,13 @@ impl Job {
         self.request.id()
     }
 
-    fn send_result(self, result: Result<DownloadResult, DownloadError>) {
+    fn send_result(self, result: Result<DownloadResult, Error>) {
         if let Some(result_tx) = self.result {
             let _ = result_tx.send(result);
         }
     }
 
-    fn fail(self, event_tx: broadcast::Sender<Event>, error: DownloadError) {
+    fn fail(self, event_tx: broadcast::Sender<Event>, error: Error) {
         let _ = event_tx.send(Event::new(
             self.id(),
             EventKind::Lifecycle {
@@ -310,6 +310,6 @@ impl Job {
                 state: DownloadState::Cancelled,
             },
         ));
-        self.send_result(Err(DownloadError::Cancelled))
+        self.send_result(Err(Error::Cancelled))
     }
 }

@@ -25,7 +25,7 @@ fn init_tracing() {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
 
     let manager = DownloadManager::default();

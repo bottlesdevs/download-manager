@@ -1,11 +1,13 @@
 use derive_builder::Builder;
 use reqwest::{
     Url,
-    header::{HeaderMap, IntoHeaderName},
+    header::{HeaderMap, HeaderValue, IntoHeaderName},
 };
 use std::path::{Path, PathBuf};
 use tracing::instrument;
 use uuid::Uuid;
+
+use crate::{Error, error::Result};
 
 /// Immutable description of a single download request.
 ///
@@ -46,16 +48,25 @@ pub struct DownloadConfig {
 impl DownloadConfigBuilder {
     /// Add an HTTP header to the request configuration.
     ///
-    /// The value must be a valid HTTP header value; invalid values will panic during parsing.
-    pub fn header(mut self, header: impl IntoHeaderName, value: impl AsRef<str>) -> Self {
-        self.headers.insert(header, value.as_ref().parse().unwrap());
-        self
+    /// The value must be a valid HTTP header value.
+    pub fn header(mut self, header: impl IntoHeaderName, value: impl AsRef<str>) -> Result<Self> {
+        let value = value.as_ref();
+        let value = HeaderValue::from_str(value).map_err(|source| Error::InvalidHeaderValue {
+            value: value.to_string(),
+            source,
+        })?;
+        self.headers.insert(header, value);
+        Ok(self)
     }
 }
 
 impl Default for DownloadConfig {
     fn default() -> Self {
-        DownloadConfigBuilder::default().build().unwrap()
+        Self {
+            retries: 3,
+            overwrite: false,
+            headers: HeaderMap::new(),
+        }
     }
 }
 
@@ -111,7 +122,7 @@ impl RequestBuilder {
     }
 
     /// Convenience for setting the User-Agent header.
-    pub fn user_agent(self, user_agent: impl AsRef<str>) -> Self {
+    pub fn user_agent(self, user_agent: impl AsRef<str>) -> Result<Self> {
         self.header(reqwest::header::USER_AGENT, user_agent)
     }
 
@@ -123,18 +134,23 @@ impl RequestBuilder {
 
     /// Add an HTTP header (e.g., Authorization, Range).
     ///
-    /// Note: value must be a valid header value; invalid values cause a panic during build.
-    pub fn header(mut self, header: impl IntoHeaderName, value: impl AsRef<str>) -> Self {
-        self.config = self.config.header(header, value);
-        self
+    /// Note: value must be a valid header value.
+    pub fn header(mut self, header: impl IntoHeaderName, value: impl AsRef<str>) -> Result<Self> {
+        self.config = self.config.header(header, value)?;
+        Ok(self)
     }
 
     #[instrument(level = "info", skip(self))]
-    pub fn build(self) -> anyhow::Result<Request> {
+    pub fn build(self) -> Result<Request> {
         let id = self.id;
-        let url = self.url.ok_or_else(|| anyhow::anyhow!("URL must be set"))?;
+        let url = self
+            .url
+            .ok_or_else(|| Error::InvalidRequest("URL must be set".to_string()))?;
         let destination = self.destination;
-        let config = self.config.build()?;
+        let config = self
+            .config
+            .build()
+            .map_err(|error| Error::InvalidConfig(error.to_string()))?;
 
         Ok(Request {
             id,

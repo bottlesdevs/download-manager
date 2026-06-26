@@ -34,8 +34,8 @@ pub struct Request {
     progress: watch::Sender<Progress>,
     events: EventBus,
 
-    pub cancel_token: CancellationToken,
-
+    #[builder(field(ty = "CancellationToken"), setter(custom))]
+    _cancel_token: (),
     #[builder(field(ty = "Option<mpsc::Sender<SchedulerCmd>>"), setter(custom))]
     _sched_tx: (),
 }
@@ -99,7 +99,7 @@ impl Request {
             config: DownloadConfigBuilder::default(),
             progress: None,
             events: Some(manager.ctx.events.clone()),
-            cancel_token: Some(manager.child_token()),
+            _cancel_token: manager.child_token(),
             _sched_tx: Some(manager.scheduler_tx.clone()),
         }
     }
@@ -160,7 +160,7 @@ impl RequestBuilder {
 
     #[instrument(level = "info", skip(self))]
     pub fn start(self) -> anyhow::Result<Download> {
-        let cancel_token = self.cancel_token.expect("Cancel token must be set");
+        let cancel_token = self._cancel_token;
         if cancel_token.is_cancelled() {
             return Err(DownloadError::ManagerShutdown.into());
         }
@@ -185,14 +185,18 @@ impl RequestBuilder {
 
             events,
             progress: progress_tx,
-            cancel_token: cancel_token.clone(),
 
+            _cancel_token: (),
             _sched_tx: (),
         };
 
         let sched_tx = self._sched_tx.expect("sched_tx must be set");
         debug!(id = %id, url = %url, destination = ?destination, "Enqueuing download request");
-        sched_tx.try_send(SchedulerCmd::Enqueue { request, result_tx })?;
+        sched_tx.try_send(SchedulerCmd::Enqueue {
+            request,
+            result_tx,
+            cancel_token: cancel_token.clone(),
+        })?;
 
         Ok(Download::new(
             id,

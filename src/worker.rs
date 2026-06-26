@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use reqwest::{Client, Method};
 use tokio::{fs::File, io::AsyncWriteExt, sync::mpsc};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, trace, warn};
 use uuid::Uuid;
 
@@ -26,8 +27,9 @@ pub(crate) async fn run(
     request: Arc<Request>,
     ctx: Arc<Context>,
     worker_tx: mpsc::Sender<WorkerMsg>,
+    cancel_token: CancellationToken,
 ) {
-    let result = attempt_download(request.as_ref(), ctx.client.clone()).await;
+    let result = attempt_download(request.as_ref(), ctx.client.clone(), cancel_token).await;
     if result.is_ok() {
         info!(id = %request.id(), "Download attempt finished successfully");
     } else {
@@ -43,7 +45,11 @@ pub(crate) async fn run(
 }
 
 #[instrument(level = "debug", skip(request, client), fields(id = %request.id(), url = %request.url()))]
-pub(crate) async fn probe_head(request: &Request, client: &Client) -> Option<RemoteInfo> {
+pub(crate) async fn probe_head(
+    request: &Request,
+    client: &Client,
+    cancel_token: CancellationToken,
+) -> Option<RemoteInfo> {
     use reqwest::header;
     debug!("Probing remote with HTTP HEAD");
     let req = client
@@ -53,7 +59,7 @@ pub(crate) async fn probe_head(request: &Request, client: &Client) -> Option<Rem
 
     let resp = tokio::select! {
         resp = req => resp.ok()?.error_for_status().ok()?,
-        _ = request.cancel_token.cancelled() => return None,
+        _ = cancel_token.cancelled() => return None,
     };
 
     let headers = resp.headers();
@@ -89,8 +95,9 @@ pub(crate) async fn probe_head(request: &Request, client: &Client) -> Option<Rem
 pub(crate) async fn attempt_download(
     request: &Request,
     client: Client,
+    cancel_token: CancellationToken,
 ) -> Result<DownloadResult, DownloadError> {
-    if let Some(info) = probe_head(request, &client).await {
+    if let Some(info) = probe_head(request, &client, cancel_token.clone()).await {
         request.emit(Event::Probed {
             id: request.id(),
             info,
@@ -114,7 +121,7 @@ pub(crate) async fn attempt_download(
 
     let mut response = tokio::select! {
       resp = req => Ok(resp?.error_for_status()?),
-        _ = request.cancel_token.cancelled() =>  Err(DownloadError::Cancelled),
+        _ = cancel_token.cancelled() =>  Err(DownloadError::Cancelled),
     }?;
     let total_bytes = response.content_length();
     debug!(total_bytes = ?total_bytes, "Server accepted download");
@@ -130,7 +137,7 @@ pub(crate) async fn attempt_download(
     let mut progress = Progress::new(total_bytes);
     loop {
         tokio::select! {
-            _ = request.cancel_token.cancelled() => {
+            _ = cancel_token.cancelled() => {
                 warn!(destination = ?request.destination(), "Cancellation received; cleaning up partial file");
                 drop(file);
                 tokio::fs::remove_file(request.destination()).await?;

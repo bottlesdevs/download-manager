@@ -38,6 +38,7 @@ pub(crate) enum SchedulerCmd {
     Enqueue {
         request: Request,
         result_tx: oneshot::Sender<Result<DownloadResult, DownloadError>>,
+        cancel_token: CancellationToken,
     },
     Cancel {
         id: Uuid,
@@ -162,13 +163,18 @@ impl Scheduler {
     #[instrument(level = "debug", skip(self, cmd))]
     async fn handle_cmd(&mut self, cmd: SchedulerCmd) {
         match cmd {
-            SchedulerCmd::Enqueue { request, result_tx } => {
+            SchedulerCmd::Enqueue {
+                request,
+                result_tx,
+                cancel_token,
+            } => {
                 let id = request.id();
                 debug!(%id, url = %request.url(), destination = ?request.destination(), "Enqueue request");
                 self.schedule(Job {
                     request: Arc::new(request),
                     result: Some(result_tx),
                     attempt: 0,
+                    cancel_token,
                 });
             }
             SchedulerCmd::Cancel { id } => {
@@ -215,20 +221,21 @@ impl Scheduler {
                 }
             };
 
-            let Some(entry) = self.jobs.get_mut(&id) else {
+            let Some(job) = self.jobs.get_mut(&id) else {
                 drop(permit);
                 trace!(%id, "Job not found when dispatching");
                 continue;
             };
 
-            let request = entry.request.clone();
+            let request = job.request.clone();
+            let cancel_token = job.cancel_token.clone();
             let ctx = self.ctx.clone();
             let worker_tx = self.worker_tx.clone();
 
             info!(%id, "Dispatching job to worker");
             self.tracker.spawn(async move {
                 let _guard = ActiveGuard::new(ctx.clone(), permit);
-                run(request, ctx, worker_tx).await;
+                run(request, ctx, worker_tx, cancel_token).await;
             });
         }
     }
@@ -238,6 +245,7 @@ pub(crate) struct Job {
     request: Arc<Request>,
     attempt: u32,
     result: Option<oneshot::Sender<Result<DownloadResult, DownloadError>>>,
+    cancel_token: CancellationToken,
 }
 
 impl Job {
@@ -277,7 +285,7 @@ impl Job {
     }
 
     fn cancel(self) {
-        self.request.cancel_token.cancel();
+        self.cancel_token.cancel();
         self.request.emit(Event::Cancelled { id: self.id() });
         self.send_result(Err(DownloadError::Cancelled))
     }

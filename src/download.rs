@@ -1,9 +1,10 @@
-use crate::{DownloadError, DownloadID, Event, Progress};
+use crate::{DownloadError, Event, Progress};
 use futures_core::Stream;
 use std::path::PathBuf;
 use tokio::sync::{broadcast, oneshot, watch};
 use tokio_stream::wrappers::{BroadcastStream, WatchStream};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 /// Handle for a single download scheduled by DownloadManager.
 ///
@@ -12,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 /// - Exposes per-download streams via [Download::progress()] and [Download::events()].
 /// - Cancellation is cooperative via [Download::cancel()]; the worker aborts the HTTP request and removes any partial file.
 pub struct Download {
-    id: DownloadID,
+    id: Uuid,
     progress: watch::Receiver<Progress>,
     events: broadcast::Receiver<Event>,
     result: oneshot::Receiver<Result<DownloadResult, DownloadError>>,
@@ -22,7 +23,7 @@ pub struct Download {
 
 impl Download {
     pub(crate) fn new(
-        id: DownloadID,
+        id: Uuid,
         progress: watch::Receiver<Progress>,
         events: broadcast::Receiver<Event>,
         result: oneshot::Receiver<Result<DownloadResult, DownloadError>>,
@@ -38,7 +39,7 @@ impl Download {
     }
 
     /// Unique identifier for this download, matching [DownloadEvent] IDs.
-    pub fn id(&self) -> DownloadID {
+    pub fn id(&self) -> Uuid {
         self.id
     }
 

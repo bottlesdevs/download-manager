@@ -8,9 +8,10 @@ use futures_util::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::{sync::CancellationToken, task::TaskTracker, time::DelayQueue};
 use tracing::{debug, error, info, instrument, trace, warn};
+use uuid::Uuid;
 
 use crate::{
-    DownloadError, DownloadID, DownloadResult, Event, Request,
+    DownloadError, DownloadResult, Event, Request,
     context::Context,
     worker::{WorkerMsg, run},
 };
@@ -39,7 +40,7 @@ pub(crate) enum SchedulerCmd {
         result_tx: oneshot::Sender<Result<DownloadResult, DownloadError>>,
     },
     Cancel {
-        id: DownloadID,
+        id: Uuid,
     },
 }
 
@@ -52,9 +53,9 @@ pub(crate) struct Scheduler {
     worker_tx: mpsc::Sender<WorkerMsg>,
     worker_rx: mpsc::Receiver<WorkerMsg>,
 
-    jobs: HashMap<DownloadID, Job>,
-    ready: VecDeque<DownloadID>,
-    delayed: DelayQueue<DownloadID>,
+    jobs: HashMap<Uuid, Job>,
+    ready: VecDeque<Uuid>,
+    delayed: DelayQueue<Uuid>,
 }
 
 impl Scheduler {
@@ -240,7 +241,7 @@ pub(crate) struct Job {
 }
 
 impl Job {
-    fn id(&self) -> DownloadID {
+    fn id(&self) -> Uuid {
         self.request.id()
     }
 

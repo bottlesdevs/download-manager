@@ -8,7 +8,6 @@ mod worker;
 
 pub mod prelude {
     pub use crate::{
-        context::DownloadID,
         download::{Download, DownloadResult},
         error::DownloadError,
         events::{Event, Progress},
@@ -32,6 +31,7 @@ use std::{
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, info, instrument, trace, warn};
+use uuid::Uuid;
 
 /// Entry point for scheduling, observing, and cancelling downloads.
 ///
@@ -112,8 +112,8 @@ impl DownloadManager {
     ///
     /// - No-op if the job is already finished or missing.
     /// - Returns an error if the internal command channel is unavailable or the buffer is full.
-    #[instrument(level = "info", skip(self), fields(id = id))]
-    pub fn try_cancel(&self, id: DownloadID) -> anyhow::Result<()> {
+    #[instrument(level = "info", skip(self), fields(?id = id))]
+    pub fn try_cancel(&self, id: Uuid) -> anyhow::Result<()> {
         match self.scheduler_tx.try_send(SchedulerCmd::Cancel { id }) {
             Ok(_) => {
                 debug!(%id, "Cancel command enqueued (try_cancel)");
@@ -130,8 +130,8 @@ impl DownloadManager {
     ///
     /// - No-op if the job is already finished or missing.
     /// - Returns an error only if the internal command channel is unavailable.
-    #[instrument(level = "info", skip(self), fields(id = id))]
-    pub async fn cancel(&self, id: DownloadID) -> anyhow::Result<()> {
+    #[instrument(level = "info", skip(self), fields(?id = id))]
+    pub async fn cancel(&self, id: Uuid) -> anyhow::Result<()> {
         match self.scheduler_tx.send(SchedulerCmd::Cancel { id }).await {
             Ok(_) => {
                 info!(%id, "Cancel command sent");

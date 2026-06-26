@@ -1,10 +1,10 @@
-use crate::DownloadID;
 use crate::download::RemoteInfo;
 use reqwest::Url;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
+use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub(crate) struct EventBus(broadcast::Sender<Event>);
@@ -45,36 +45,36 @@ impl EventBus {
 #[derive(Debug, Clone)]
 pub enum Event {
     Queued {
-        id: DownloadID,
+        id: Uuid,
         url: Url,
         destination: PathBuf,
     },
     Probed {
-        id: DownloadID,
+        id: Uuid,
         info: RemoteInfo,
     },
     Started {
-        id: DownloadID,
+        id: Uuid,
         url: Url,
         destination: PathBuf,
         total_bytes: Option<u64>,
     },
     Retrying {
-        id: DownloadID,
+        id: Uuid,
         attempt: u32,
         next_delay_ms: u64,
     },
     Completed {
-        id: DownloadID,
+        id: Uuid,
         path: PathBuf,
         bytes_downloaded: u64,
     },
     Failed {
-        id: DownloadID,
+        id: Uuid,
         error: String,
     },
     Cancelled {
-        id: DownloadID,
+        id: Uuid,
     },
 }
 

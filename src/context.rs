@@ -1,16 +1,10 @@
 use reqwest::Client;
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, AtomicUsize, Ordering},
-};
+use std::sync::{Arc, atomic::AtomicUsize};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::{DownloadManagerConfig, events::EventBus};
-
-/// Unique identifier for a download; monotonically increasing u64.
-pub type DownloadID = u64;
 
 /// Shared runtime context for coordinating downloads. Internal to the crate.
 /// Holds the concurrency semaphore, root cancellation token, HTTP client,
@@ -26,8 +20,6 @@ pub(crate) struct Context {
     pub client: Client,
 
     // Counters
-    /// Monotonic counter for generating DownloadID values.
-    pub id_counter: AtomicU64,
     /// Number of currently active (running) downloads.
     pub active: AtomicUsize,
 
@@ -45,7 +37,6 @@ impl Context {
             semaphore: Arc::new(Semaphore::new(config.max_concurrent)),
             cancel_root,
             active: AtomicUsize::new(0),
-            id_counter: AtomicU64::new(1),
             client: Client::new(),
             events: EventBus::new(),
         });
@@ -54,13 +45,6 @@ impl Context {
             "Context initialized"
         );
         ctx
-    }
-
-    /// Atomically generate the next [DownloadID] (relaxed ordering).
-    /// Unique within the lifetime of this Context; starts at 1.
-    #[inline]
-    pub fn next_id(&self) -> DownloadID {
-        self.id_counter.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Create a child [CancellationToken] tied to the manager's root token.

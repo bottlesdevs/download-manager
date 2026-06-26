@@ -1,5 +1,5 @@
 use crate::{
-    Download, DownloadID, DownloadManager, Event, Progress, error::DownloadError, events::EventBus,
+    Download, DownloadManager, Event, Progress, error::DownloadError, events::EventBus,
     scheduler::SchedulerCmd,
 };
 use derive_builder::Builder;
@@ -14,6 +14,7 @@ use std::{
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, trace};
+use uuid::Uuid;
 
 /// Immutable description of a single download request.
 ///
@@ -24,8 +25,8 @@ use tracing::{debug, instrument, trace};
 #[builder(pattern = "owned")]
 #[builder(build_fn(skip))]
 pub struct Request {
-    #[builder(field(ty = "DownloadID"))]
-    id: DownloadID,
+    #[builder(field(ty = "Uuid"))]
+    id: Uuid,
     url: Url,
     #[builder(setter(into))]
     destination: PathBuf,
@@ -105,7 +106,7 @@ impl DownloadConfig {
 impl Request {
     pub fn builder(manager: &DownloadManager) -> RequestBuilder {
         RequestBuilder {
-            id: manager.ctx.next_id(),
+            id: Uuid::new_v4(),
             url: None,
             destination: None,
             config: DownloadConfigBuilder::default(),
@@ -118,7 +119,7 @@ impl Request {
         }
     }
 
-    pub fn id(&self) -> DownloadID {
+    pub fn id(&self) -> Uuid {
         self.id
     }
 

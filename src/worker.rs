@@ -3,9 +3,10 @@ use std::sync::Arc;
 use reqwest::{Client, Method};
 use tokio::{fs::File, io::AsyncWriteExt, sync::mpsc};
 use tracing::{debug, error, info, instrument, trace, warn};
+use uuid::Uuid;
 
 use crate::{
-    context::{Context, DownloadID},
+    context::Context,
     download::RemoteInfo,
     error::DownloadError,
     events::{Event, Progress},
@@ -15,7 +16,7 @@ use crate::{
 
 pub(crate) enum WorkerMsg {
     Finish {
-        id: DownloadID,
+        id: Uuid,
         result: Result<DownloadResult, DownloadError>,
     },
 }

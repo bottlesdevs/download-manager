@@ -1,3 +1,4 @@
+use crate::{DownloadManagerConfig, error::Result, events::Event};
 use reqwest::Client;
 use std::sync::{
     Arc,
@@ -6,8 +7,6 @@ use std::sync::{
 use tokio::sync::{Semaphore, broadcast};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
-
-use crate::{DownloadManagerConfig, events::Event};
 
 /// Shared runtime context for coordinating downloads. Internal to the crate.
 /// Holds the concurrency semaphore, root cancellation token, HTTP client,
@@ -63,7 +62,7 @@ impl Context {
         self.cancel_root.cancel();
     }
 
-    pub fn active_guard(self: &Arc<Self>) -> anyhow::Result<ActiveGuard> {
+    pub fn active_guard(self: &Arc<Self>) -> Result<ActiveGuard> {
         let permit = self.semaphore.clone().try_acquire_owned()?;
         self.active.fetch_add(1, Ordering::Relaxed);
         Ok(ActiveGuard {

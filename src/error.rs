@@ -2,8 +2,10 @@ use std::path::PathBuf;
 use thiserror::Error;
 use tracing::instrument;
 
+pub type Result<T> = std::result::Result<T, Error>;
+
 #[derive(Error, Debug)]
-pub enum DownloadError {
+pub enum Error {
     #[error("Network error: {0}")]
     Network(#[from] reqwest::Error),
     #[error("I/O error: {0}")]
@@ -11,18 +13,36 @@ pub enum DownloadError {
     #[error("Download was cancelled")]
     Cancelled,
     #[error("Retry limit exceeded: {last_error}")]
-    RetriesExhausted { last_error: Box<DownloadError> },
+    RetriesExhausted { last_error: Box<Error> },
     #[error("Download manager has been shut down")]
     ManagerShutdown,
     #[error("File already exists: {path}")]
     FileExists { path: PathBuf },
+    #[error("Invalid header value `{value}`: {source}")]
+    InvalidHeaderValue {
+        value: String,
+        #[source]
+        source: reqwest::header::InvalidHeaderValue,
+    },
+    #[error("Invalid request: {0}")]
+    InvalidRequest(String),
+    #[error("Invalid configuration: {0}")]
+    InvalidConfig(String),
+    #[error("Download manager command queue is full")]
+    CommandQueueFull,
+    #[error("Download manager command channel is closed")]
+    CommandChannelClosed,
+    #[error("No download concurrency permits are available")]
+    NoConcurrencyPermits,
+    #[error("Download concurrency limiter is closed")]
+    ConcurrencyLimiterClosed,
     #[error("Invalid URL: {0}")]
     InvalidUrl(String),
     #[error("Unknown error: {0}")]
     Unknown(String),
 }
 
-impl DownloadError {
+impl Error {
     /// Classify whether this error should be retried by the scheduler.
     ///
     /// Returns true for transient reqwest errors (timeout, connect, request) and HTTP 5xx.
@@ -42,6 +62,30 @@ impl DownloadError {
             }
             Self::Cancelled | Self::Io(_) => false,
             _ => false,
+        }
+    }
+}
+
+impl<T> From<tokio::sync::mpsc::error::SendError<T>> for Error {
+    fn from(_: tokio::sync::mpsc::error::SendError<T>) -> Self {
+        Self::CommandChannelClosed
+    }
+}
+
+impl<T> From<tokio::sync::mpsc::error::TrySendError<T>> for Error {
+    fn from(error: tokio::sync::mpsc::error::TrySendError<T>) -> Self {
+        match error {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => Self::CommandQueueFull,
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => Self::CommandChannelClosed,
+        }
+    }
+}
+
+impl From<tokio::sync::TryAcquireError> for Error {
+    fn from(error: tokio::sync::TryAcquireError) -> Self {
+        match error {
+            tokio::sync::TryAcquireError::NoPermits => Self::NoConcurrencyPermits,
+            tokio::sync::TryAcquireError::Closed => Self::ConcurrencyLimiterClosed,
         }
     }
 }

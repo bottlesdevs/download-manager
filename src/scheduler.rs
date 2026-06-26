@@ -186,33 +186,12 @@ impl Scheduler {
 
     #[instrument(level = "trace", skip(self))]
     fn try_dispatch(&mut self) {
-        struct ActiveGuard {
-            ctx: Arc<Context>,
-            _permit: tokio::sync::OwnedSemaphorePermit,
-        }
-
-        impl ActiveGuard {
-            fn new(ctx: Arc<Context>, permit: tokio::sync::OwnedSemaphorePermit) -> Self {
-                ctx.active.fetch_add(1, Ordering::Relaxed);
-                Self {
-                    ctx,
-                    _permit: permit,
-                }
-            }
-        }
-
-        impl Drop for ActiveGuard {
-            fn drop(&mut self) {
-                self.ctx.active.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
-
         while let Some(id) = self.ready.pop_front() {
             if self.shutdown_token.is_cancelled() {
                 return;
             }
-            let permit = match self.ctx.semaphore.clone().try_acquire_owned() {
-                Ok(p) => p,
+            let guard = match self.ctx.active_guard() {
+                Ok(g) => g,
                 Err(_) => {
                     // No permits left; put the job back to the front and stop dispatching for now.
                     trace!(%id, "No semaphore permits available; requeuing to front");
@@ -222,7 +201,7 @@ impl Scheduler {
             };
 
             let Some(job) = self.jobs.get_mut(&id) else {
-                drop(permit);
+                drop(guard);
                 trace!(%id, "Job not found when dispatching");
                 continue;
             };
@@ -234,7 +213,7 @@ impl Scheduler {
 
             info!(%id, "Dispatching job to worker");
             self.tracker.spawn(async move {
-                let _guard = ActiveGuard::new(ctx.clone(), permit);
+                let _guard = guard;
                 run(request, ctx, worker_tx, cancel_token).await;
             });
         }

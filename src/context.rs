@@ -1,5 +1,11 @@
 use reqwest::Client;
-use std::sync::{Arc, atomic::AtomicUsize};
+use std::{
+    any,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -57,5 +63,26 @@ impl Context {
     /// Cancel the root token, cooperatively cancelling all in-flight downloads.
     pub fn cancel_all(&self) {
         self.cancel_root.cancel();
+    }
+
+    pub fn active_guard(self: &Arc<Self>) -> anyhow::Result<ActiveGuard> {
+        let permit = self.semaphore.clone().try_acquire_owned()?;
+        self.active.fetch_add(1, Ordering::Relaxed);
+        Ok(ActiveGuard {
+            ctx: self.clone(),
+            _permit: permit,
+        })
+    }
+}
+
+/// RAII guard tracking the acvtive-downloads counter alongside a semaphore permit
+pub(crate) struct ActiveGuard {
+    ctx: Arc<Context>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        self.ctx.active.fetch_sub(1, Ordering::Relaxed);
     }
 }

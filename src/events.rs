@@ -1,6 +1,4 @@
 use crate::download::RemoteInfo;
-use reqwest::Url;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -25,35 +23,50 @@ impl Event {
 }
 
 #[derive(Debug, Clone)]
+pub enum DownloadState {
+    Queued,
+    Probing,
+    Planned,
+    Running,
+    Retrying,
+    Paused,
+    Completed,
+    Failed { error: String },
+    Cancelled,
+}
+
+impl std::fmt::Display for DownloadState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DownloadState::Queued => write!(f, "Queued"),
+            DownloadState::Probing => write!(f, "Probing"),
+            DownloadState::Planned => write!(f, "Planned"),
+            DownloadState::Running => write!(f, "Running"),
+            DownloadState::Retrying => write!(f, "Retrying"),
+            DownloadState::Paused => write!(f, "Paused"),
+            DownloadState::Completed => write!(f, "Completed"),
+            DownloadState::Failed { error } => write!(f, "Failed: {}", error),
+            DownloadState::Cancelled => write!(f, "Cancelled"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum EventKind {
-    Queued {
-        url: Url,
-        destination: PathBuf,
+    Lifecycle {
+        state: DownloadState,
     },
-    Probed {
+    Metadata {
         info: RemoteInfo,
     },
     Progress {
         bytes_downloaded: u64,
         total_bytes: Option<u64>,
     },
-    Started {
-        url: Url,
-        destination: PathBuf,
-        total_bytes: Option<u64>,
-    },
-    Retrying {
+    RetryScheduled {
         attempt: u32,
         next_delay_ms: u64,
     },
-    Completed {
-        path: PathBuf,
-        bytes_downloaded: u64,
-    },
-    Failed {
-        error: String,
-    },
-    Cancelled,
 }
 
 impl std::fmt::Display for Event {
@@ -65,32 +78,17 @@ impl std::fmt::Display for Event {
 impl std::fmt::Display for EventKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EventKind::Queued { .. } => write!(f, "Queued"),
-            EventKind::Probed { info } => write!(f, "Probed: {:?}", info),
+            EventKind::Lifecycle { state } => write!(f, "Lifecycle: {}", state),
+            EventKind::Metadata { info } => write!(f, "Probed: {:?}", info),
             EventKind::Progress {
                 bytes_downloaded,
                 total_bytes,
             } => write!(f, "Progress: {:?}:{:?}", bytes_downloaded, total_bytes),
-            EventKind::Failed { error } => write!(f, "Failed: {}", error),
-            EventKind::Cancelled => write!(f, "Cancelled"),
-            EventKind::Started { total_bytes, .. } => {
-                if let Some(total) = total_bytes {
-                    write!(f, "Started ({} bytes)", total)
-                } else {
-                    write!(f, "Started")
-                }
-            }
-            EventKind::Retrying {
+            EventKind::RetryScheduled {
                 attempt,
                 next_delay_ms,
             } => {
                 write!(f, "Retrying: attempt {} in {} ms", attempt, next_delay_ms)
-            }
-            EventKind::Completed {
-                path,
-                bytes_downloaded,
-            } => {
-                write!(f, "Completed: {:?} ({} bytes)", path, bytes_downloaded)
             }
         }
     }

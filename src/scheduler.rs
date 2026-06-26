@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::{
     DownloadError, DownloadResult, Event, Request,
     context::Context,
-    events::EventKind,
+    events::{DownloadState, EventKind},
     worker::{WorkerMsg, run},
 };
 
@@ -87,9 +87,8 @@ impl Scheduler {
         let id = job.id();
         let _ = self.ctx.events.send(Event::new(
             id,
-            EventKind::Queued {
-                url: request.url().clone(),
-                destination: request.destination().to_path_buf(),
+            EventKind::Lifecycle {
+                state: DownloadState::Queued,
             },
         ));
         debug!(%id, url = %request.url(), destination = ?request.destination(), "Job queued");
@@ -129,7 +128,7 @@ impl Scheduler {
                     let _ = self
                         .ctx
                         .events
-                        .send(Event::new(id, EventKind::Probed { info }));
+                        .send(Event::new(id, EventKind::Metadata { info }));
                 }
             }
             WorkerMsg::Progress {
@@ -274,8 +273,10 @@ impl Job {
     fn fail(self, event_tx: broadcast::Sender<Event>, error: DownloadError) {
         let _ = event_tx.send(Event::new(
             self.id(),
-            EventKind::Failed {
-                error: error.to_string(),
+            EventKind::Lifecycle {
+                state: DownloadState::Failed {
+                    error: error.to_string(),
+                },
             },
         ));
         self.send_result(Err(error));
@@ -284,9 +285,8 @@ impl Job {
     fn finish(self, event_tx: broadcast::Sender<Event>, result: DownloadResult) {
         let _ = event_tx.send(Event::new(
             self.id(),
-            EventKind::Completed {
-                path: result.path.clone(),
-                bytes_downloaded: result.bytes_downloaded,
+            EventKind::Lifecycle {
+                state: DownloadState::Completed,
             },
         ));
         self.send_result(Ok(result))
@@ -295,7 +295,7 @@ impl Job {
     fn retry(&self, event_tx: broadcast::Sender<Event>, delay: Duration) {
         let _ = event_tx.send(Event::new(
             self.id(),
-            EventKind::Retrying {
+            EventKind::RetryScheduled {
                 attempt: self.attempt,
                 next_delay_ms: delay.as_millis() as u64,
             },
@@ -304,7 +304,12 @@ impl Job {
 
     fn cancel(self, event_tx: broadcast::Sender<Event>) {
         self.cancel_token.cancel();
-        let _ = event_tx.send(Event::new(self.id(), EventKind::Cancelled));
+        let _ = event_tx.send(Event::new(
+            self.id(),
+            EventKind::Lifecycle {
+                state: DownloadState::Cancelled,
+            },
+        ));
         self.send_result(Err(DownloadError::Cancelled))
     }
 }

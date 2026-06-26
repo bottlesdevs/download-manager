@@ -6,10 +6,15 @@ mod request;
 mod scheduler;
 mod worker;
 
+pub use crate::download::{Download, DownloadResult};
+pub use crate::error::{Error, Result};
+pub use crate::events::Event;
+pub use crate::request::Request;
+
 pub mod prelude {
     pub use crate::{
         download::{Download, DownloadResult},
-        error::DownloadError,
+        error::{Error, Result},
         events::{Event, ProgressTracker},
         request::Request,
     };
@@ -22,7 +27,6 @@ use crate::{
 };
 use derive_builder::Builder;
 use futures_core::Stream;
-use prelude::*;
 use reqwest::Url;
 use std::{
     path::Path,
@@ -90,16 +94,16 @@ impl DownloadManager {
 
     /// Start a download with default request settings.
     ///
-    /// - Returns a [Download] handle which is also a Future yielding [DownloadResult] or [DownloadError].
+    /// - Returns a [Download] handle which is also a Future yielding [DownloadResult] or Error.
     /// - You can stream progress and per-download events from the returned handle.
     /// - Cancellation: call [Download::cancel()] on the handle, or [DownloadManager::cancel(id)].
     #[instrument(level = "info", skip(self, destination), fields(url = %url))]
-    pub fn download(&self, url: Url, destination: impl AsRef<Path>) -> anyhow::Result<Download> {
+    pub fn download(&self, url: Url, destination: impl AsRef<Path>) -> Result<Download> {
         let request = self.download_builder(url, destination).build()?;
         self.enqueue(request)
     }
 
-    fn enqueue(&self, request: Request) -> anyhow::Result<Download> {
+    fn enqueue(&self, request: Request) -> Result<Download> {
         let id = request.id();
         let event_rx = self.ctx.events.subscribe();
         let (result_tx, result_rx) = oneshot::channel();
@@ -131,7 +135,7 @@ impl DownloadManager {
     /// - No-op if the job is already finished or missing.
     /// - Returns an error if the internal command channel is unavailable or the buffer is full.
     #[instrument(level = "info", skip(self), fields(?id = id))]
-    pub fn try_cancel(&self, id: Uuid) -> anyhow::Result<()> {
+    pub fn try_cancel(&self, id: Uuid) -> Result<()> {
         match self.scheduler_tx.try_send(SchedulerCmd::Cancel { id }) {
             Ok(_) => {
                 debug!(%id, "Cancel command enqueued (try_cancel)");
@@ -139,7 +143,7 @@ impl DownloadManager {
             }
             Err(e) => {
                 warn!(%id, error = %e, "Failed to send cancel command with try_send");
-                Err(anyhow::anyhow!("Failed to send cancel command: {}", e))
+                Err(e.into())
             }
         }
     }
@@ -149,7 +153,7 @@ impl DownloadManager {
     /// - No-op if the job is already finished or missing.
     /// - Returns an error only if the internal command channel is unavailable.
     #[instrument(level = "info", skip(self), fields(?id = id))]
-    pub async fn cancel(&self, id: Uuid) -> anyhow::Result<()> {
+    pub async fn cancel(&self, id: Uuid) -> Result<()> {
         match self.scheduler_tx.send(SchedulerCmd::Cancel { id }).await {
             Ok(_) => {
                 info!(%id, "Cancel command sent");
@@ -157,7 +161,7 @@ impl DownloadManager {
             }
             Err(e) => {
                 warn!(%id, error = %e, "Failed to send cancel command");
-                Err(anyhow::anyhow!("Failed to send cancel command: {}", e))
+                Err(e.into())
             }
         }
     }
@@ -228,6 +232,6 @@ pub struct DownloadManagerConfig {
 impl Default for DownloadManagerConfig {
     #[instrument(level = "debug")]
     fn default() -> Self {
-        DownloadManagerConfigBuilder::default().build().unwrap()
+        Self { max_concurrent: 3 }
     }
 }

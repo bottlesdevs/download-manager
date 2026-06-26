@@ -7,7 +7,7 @@ use tracing::{debug, error, info, instrument, trace, warn};
 use uuid::Uuid;
 
 use crate::{
-    download::RemoteInfo, error::DownloadError, events::ProgressTracker, prelude::DownloadResult,
+    download::RemoteInfo, error::Error, events::ProgressTracker, prelude::DownloadResult,
     request::Request,
 };
 
@@ -25,7 +25,7 @@ pub(crate) enum WorkerMsg {
     },
     Finish {
         id: Uuid,
-        result: Result<DownloadResult, DownloadError>,
+        result: Result<DownloadResult, Error>,
     },
 }
 
@@ -104,7 +104,7 @@ pub(crate) async fn attempt_download(
     client: Client,
     cancel_token: CancellationToken,
     worker_tx: mpsc::Sender<WorkerMsg>,
-) -> Result<DownloadResult, DownloadError> {
+) -> Result<DownloadResult, Error> {
     if let Some(info) = probe_head(request, &client, cancel_token.clone()).await {
         let _ = worker_tx
             .send(WorkerMsg::Metadata {
@@ -119,7 +119,7 @@ pub(crate) async fn attempt_download(
     }
     if request.destination().exists() && !request.config().overwrite() {
         warn!(destination = ?request.destination(), "Destination exists and overwrite=false; failing");
-        return Err(DownloadError::FileExists {
+        return Err(Error::FileExists {
             path: request.destination().to_path_buf(),
         });
     }
@@ -131,7 +131,7 @@ pub(crate) async fn attempt_download(
 
     let mut response = tokio::select! {
       resp = req => Ok(resp?.error_for_status()?),
-        _ = cancel_token.cancelled() =>  Err(DownloadError::Cancelled),
+        _ = cancel_token.cancelled() =>  Err(Error::Cancelled),
     }?;
     let total_bytes = response.content_length();
     debug!(total_bytes = ?total_bytes, "Server accepted download");
@@ -144,7 +144,7 @@ pub(crate) async fn attempt_download(
                 warn!(destination = ?request.destination(), "Cancellation received; cleaning up partial file");
                 drop(file);
                 tokio::fs::remove_file(request.destination()).await?;
-                return Err(DownloadError::Cancelled);
+                return Err(Error::Cancelled);
             }
             chunk = response.chunk() => {
                 match chunk {

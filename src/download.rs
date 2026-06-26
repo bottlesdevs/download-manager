@@ -1,4 +1,4 @@
-use crate::{DownloadError, Event, scheduler::SchedulerCmd};
+use crate::{Error, Event, error::Result, scheduler::SchedulerCmd};
 use futures_core::Stream;
 use std::path::PathBuf;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -8,13 +8,13 @@ use uuid::Uuid;
 /// Handle for a single download scheduled by DownloadManager.
 ///
 /// Behavior:
-/// - Implements Future; awaiting resolves to DownloadResult or DownloadError.
+/// - Implements Future; awaiting resolves to DownloadResult or Error.
 /// - Exposes per-download streams via [Download::progress()] and [Download::events()].
 /// - Cancellation is cooperative via [Download::cancel()]; the worker aborts the HTTP request and removes any partial file.
 pub struct Download {
     id: Uuid,
     events: broadcast::Receiver<Event>,
-    result: oneshot::Receiver<Result<DownloadResult, DownloadError>>,
+    result: oneshot::Receiver<Result<DownloadResult>>,
     cmd_tx: mpsc::Sender<SchedulerCmd>,
 }
 
@@ -22,7 +22,7 @@ impl Download {
     pub(crate) fn new(
         id: Uuid,
         events: broadcast::Receiver<Event>,
-        result: oneshot::Receiver<Result<DownloadResult, DownloadError>>,
+        result: oneshot::Receiver<Result<DownloadResult>>,
         cmd_tx: mpsc::Sender<SchedulerCmd>,
     ) -> Self {
         Download {
@@ -42,8 +42,11 @@ impl Download {
     ///
     /// The scheduler/worker aborts the in-flight HTTP request and deletes any partially
     /// written file. Cancellation is best-effort and may race with completion.
-    pub async fn cancel(&self) {
-        let _ = self.cmd_tx.send(SchedulerCmd::Cancel { id: self.id }).await;
+    pub async fn cancel(&self) -> Result<()> {
+        self.cmd_tx
+            .send(SchedulerCmd::Cancel { id: self.id })
+            .await
+            .map_err(Error::from)
     }
 
     /// Stream of [DownloadEvent] values scoped to this download only.
@@ -61,7 +64,7 @@ impl Download {
 }
 
 impl std::future::Future for Download {
-    type Output = Result<DownloadResult, DownloadError>;
+    type Output = Result<DownloadResult>;
 
     fn poll(
         mut self: std::pin::Pin<&mut Self>,
@@ -72,7 +75,7 @@ impl std::future::Future for Download {
 
         match Pin::new(&mut self.result).poll(cx) {
             Poll::Ready(Ok(result)) => Poll::Ready(result),
-            Poll::Ready(Err(_)) => Poll::Ready(Err(DownloadError::ManagerShutdown)),
+            Poll::Ready(Err(_)) => Poll::Ready(Err(Error::ManagerShutdown)),
             Poll::Pending => Poll::Pending,
         }
     }

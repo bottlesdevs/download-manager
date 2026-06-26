@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, atomic::Ordering},
+    sync::Arc,
     time::Duration,
 };
 
@@ -122,6 +122,21 @@ impl Scheduler {
             WorkerMsg::Metadata { id, info } => {
                 if let Some(_) = self.jobs.get(&id) {
                     let _ = self.ctx.events.send(Event::Probed { id, info });
+                }
+            }
+            WorkerMsg::Progress {
+                id,
+                bytes_downloaded,
+                total_bytes,
+                rate_bps,
+                eta,
+            } => {
+                if let Some(_) = self.jobs.get(&id) {
+                    let _ = self.ctx.events.send(Event::Progress {
+                        id,
+                        bytes_downloaded,
+                        total_bytes,
+                    });
                 }
             }
             WorkerMsg::Finish { id, result } => match result {

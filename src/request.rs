@@ -30,7 +30,6 @@ pub struct Request {
     #[builder(field(ty = "DownloadConfigBuilder"))]
     config: DownloadConfig,
 
-    progress: watch::Sender<Progress>,
     events: broadcast::Sender<Event>,
 
     #[builder(field(ty = "CancellationToken"), setter(custom))]
@@ -96,7 +95,6 @@ impl Request {
             url: Some(url),
             destination: None,
             config: DownloadConfigBuilder::default(),
-            progress: None,
             events: Some(manager.ctx.events.clone()),
             _cancel_token: manager.child_token(),
             _sched_tx: Some(manager.scheduler_tx.clone()),
@@ -122,12 +120,6 @@ impl Request {
     pub fn emit(&self, event: Event) {
         debug!(id = %self.id, event = %event, "Emitting event");
         self.events.send(event.clone());
-    }
-
-    pub fn update_progress(&self, progress: Progress) {
-        trace!(id = %self.id, "Updating progress");
-        // TODO: Log the error
-        let _ = self.progress.send(progress);
     }
 }
 
@@ -171,7 +163,6 @@ impl RequestBuilder {
         let config = self.config.build()?;
 
         let (result_tx, result_rx) = oneshot::channel();
-        let (progress_tx, progress_rx) = watch::channel(Progress::new(None));
         let events = self.events.unwrap();
         let event_rx = events.subscribe();
         let id = self.id;
@@ -183,7 +174,6 @@ impl RequestBuilder {
             config,
 
             events,
-            progress: progress_tx,
 
             _cancel_token: (),
             _sched_tx: (),
@@ -197,12 +187,6 @@ impl RequestBuilder {
             cancel_token: cancel_token.clone(),
         })?;
 
-        Ok(Download::new(
-            id,
-            progress_rx,
-            event_rx,
-            result_rx,
-            cancel_token,
-        ))
+        Ok(Download::new(id, event_rx, result_rx, cancel_token))
     }
 }

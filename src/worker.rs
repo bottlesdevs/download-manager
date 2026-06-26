@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use reqwest::{Client, Method};
 use tokio::{fs::File, io::AsyncWriteExt, sync::mpsc};
@@ -19,6 +19,13 @@ pub(crate) enum WorkerMsg {
     Metadata {
         id: Uuid,
         info: RemoteInfo,
+    },
+    Progress {
+        id: Uuid,
+        bytes_downloaded: u64,
+        total_bytes: Option<u64>,
+        rate_bps: f64,
+        eta: Option<Duration>,
     },
     Finish {
         id: Uuid,
@@ -109,10 +116,12 @@ pub(crate) async fn attempt_download(
     worker_tx: mpsc::Sender<WorkerMsg>,
 ) -> Result<DownloadResult, DownloadError> {
     if let Some(info) = probe_head(request, &client, cancel_token.clone()).await {
-        worker_tx.send(WorkerMsg::Metadata {
-            id: request.id(),
-            info,
-        });
+        let _ = worker_tx
+            .send(WorkerMsg::Metadata {
+                id: request.id(),
+                info,
+            })
+            .await;
     }
 
     if let Some(parent) = request.destination().parent() {
@@ -159,7 +168,14 @@ pub(crate) async fn attempt_download(
                     Ok(Some(chunk)) => {
                         file.write_all(&chunk).await?;
                         if progress.update(chunk.len() as u64) {
-                            request.update_progress(progress);
+                            let _ = worker_tx.send(WorkerMsg::Progress {
+                                id: request.id(),
+                                bytes_downloaded: progress.bytes_downloaded(),
+                                total_bytes,
+                                rate_bps: progress.ema_bps,
+                                eta: progress.eta()
+                            })
+                            .await;
                         }
                     }
                     Ok(None) => break,
@@ -175,7 +191,15 @@ pub(crate) async fn attempt_download(
     }
 
     progress.force_update();
-    let _ = request.update_progress(progress);
+    let _ = worker_tx
+        .send(WorkerMsg::Progress {
+            id: request.id(),
+            bytes_downloaded: progress.bytes_downloaded(),
+            total_bytes,
+            rate_bps: progress.ema_bps,
+            eta: progress.eta(),
+        })
+        .await;
     file.sync_all().await?;
     info!(destination = ?request.destination(), bytes = progress.bytes_downloaded(), "Download completed successfully");
 

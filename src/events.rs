@@ -15,6 +15,11 @@ pub enum Event {
         id: Uuid,
         info: RemoteInfo,
     },
+    Progress {
+        id: Uuid,
+        bytes_downloaded: u64,
+        total_bytes: Option<u64>,
+    },
     Started {
         id: Uuid,
         url: Url,
@@ -45,6 +50,15 @@ impl std::fmt::Display for Event {
         match self {
             Event::Queued { id, .. } => write!(f, "[{}] Queued", id),
             Event::Probed { id, info } => write!(f, "[{}] Probed: {:?}", id, info),
+            Event::Progress {
+                id,
+                bytes_downloaded,
+                total_bytes,
+            } => write!(
+                f,
+                "[{}] Progress: {:?}:{:?}",
+                id, bytes_downloaded, total_bytes
+            ),
             Event::Failed { id, error } => write!(f, "[{}] Failed: {}", id, error),
             Event::Cancelled { id } => write!(f, "[{}] Cancelled", id),
             Event::Started {

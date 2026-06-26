@@ -1,8 +1,8 @@
-use crate::{DownloadError, Event, Progress};
+use crate::{DownloadError, Event};
 use futures_core::Stream;
 use std::path::PathBuf;
-use tokio::sync::{broadcast, oneshot, watch};
-use tokio_stream::wrappers::{BroadcastStream, WatchStream};
+use tokio::sync::{broadcast, oneshot};
+use tokio_stream::wrappers::BroadcastStream;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -14,7 +14,6 @@ use uuid::Uuid;
 /// - Cancellation is cooperative via [Download::cancel()]; the worker aborts the HTTP request and removes any partial file.
 pub struct Download {
     id: Uuid,
-    progress: watch::Receiver<Progress>,
     events: broadcast::Receiver<Event>,
     result: oneshot::Receiver<Result<DownloadResult, DownloadError>>,
 
@@ -24,14 +23,12 @@ pub struct Download {
 impl Download {
     pub(crate) fn new(
         id: Uuid,
-        progress: watch::Receiver<Progress>,
         events: broadcast::Receiver<Event>,
         result: oneshot::Receiver<Result<DownloadResult, DownloadError>>,
         cancel_token: CancellationToken,
     ) -> Self {
         Download {
             id,
-            progress,
             events,
             result,
             cancel_token,
@@ -51,18 +48,6 @@ impl Download {
         self.cancel_token.cancel();
     }
 
-    pub fn progress_raw(&self) -> watch::Receiver<Progress> {
-        self.progress.clone()
-    }
-
-    /// Stream of sampled Progress updates for this download.
-    ///
-    /// Backed by a watch channel: consumers receive the latest state immediately,
-    /// and updates are coalesced according to sampling thresholds.
-    pub fn progress(&self) -> impl Stream<Item = Progress> + 'static {
-        WatchStream::new(self.progress_raw())
-    }
-
     /// Stream of [DownloadEvent] values scoped to this download only.
     ///
     /// Backed by a broadcast channel; lagged consumers may drop messages.
@@ -76,6 +61,7 @@ impl Download {
             .filter(move |event| {
                 let matches = match event {
                     Event::Queued { id, .. }
+                    | Event::Progress { id, .. }
                     | Event::Probed { id, .. }
                     | Event::Started { id, .. }
                     | Event::Retrying { id, .. }

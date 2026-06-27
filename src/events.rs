@@ -22,7 +22,7 @@ impl Event {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DownloadState {
     Queued,
     Probing,
@@ -30,6 +30,7 @@ pub enum DownloadState {
     Running,
     Retrying,
     Paused,
+    Cancelling,
     Completed,
     Failed { error: String },
     Cancelled,
@@ -44,6 +45,7 @@ impl std::fmt::Display for DownloadState {
             DownloadState::Running => write!(f, "Running"),
             DownloadState::Retrying => write!(f, "Retrying"),
             DownloadState::Paused => write!(f, "Paused"),
+            DownloadState::Cancelling => write!(f, "Cancelling"),
             DownloadState::Completed => write!(f, "Completed"),
             DownloadState::Failed { error } => write!(f, "Failed: {}", error),
             DownloadState::Cancelled => write!(f, "Cancelled"),

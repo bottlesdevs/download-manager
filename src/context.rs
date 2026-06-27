@@ -57,11 +57,6 @@ impl Context {
         self.cancel_root.child_token()
     }
 
-    /// Cancel the root token, cooperatively cancelling all in-flight downloads.
-    pub fn cancel_all(&self) {
-        self.cancel_root.cancel();
-    }
-
     pub fn active_guard(self: &Arc<Self>) -> Result<ActiveGuard> {
         let permit = self.semaphore.clone().try_acquire_owned()?;
         self.active.fetch_add(1, Ordering::Relaxed);

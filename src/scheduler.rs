@@ -7,7 +7,7 @@ use std::{
 use futures_util::StreamExt;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::{sync::CancellationToken, task::TaskTracker, time::DelayQueue};
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, info, instrument, trace, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -111,7 +111,11 @@ impl Scheduler {
                 Some(msg) = self.worker_rx.recv() => self.handle_worker_msg(msg).await,
                 expired = self.delayed.next(), if !self.delayed.is_empty() => {
                     if let Some(exp) = expired {
-                        self.ready.push_back(exp.into_inner());
+                        let id = exp.into_inner();
+                        if let Some(job) = self.jobs.get_mut(&id) {
+                            job.state = DownloadState::Queued;
+                            self.ready.push_back(id);
+                        }
                     }
                 }
                 _ = self.shutdown_token.cancelled() => {
@@ -154,46 +158,33 @@ impl Scheduler {
                     ));
                 }
             }
-            WorkerMsg::Finish { id, result } => match result {
-                Ok(result) => {
-                    let Some(job) = self.jobs.remove(&id) else {
-                        return;
-                    };
-                    info!(%id, "Job completed successfully");
-                    job.finish(self.ctx.events.clone(), result)
-                }
-                Err(Error::Cancelled) => {
-                    let Some(job) = self.jobs.remove(&id) else {
-                        return;
-                    };
-                    warn!(%id, "Job cancelled");
-                    job.cancel(self.ctx.events.clone())
-                }
-                Err(error) if error.is_retryable() => {
-                    let Some(job) = self.jobs.get_mut(&id) else {
-                        return;
-                    };
-                    if job.attempt >= job.request.config().retries() {
-                        warn!(%id, attempt = job.attempt, retries = job.request.config().retries(), error = %error, "Retry limit exceeded; failing job");
-                        self.jobs
-                            .remove(&id)
-                            .map(|job| job.fail(self.ctx.events.clone(), error));
-                        return;
+            WorkerMsg::Finish { id, result } => {
+                let Some(mut job) = self.jobs.remove(&id) else {
+                    return;
+                };
+
+                match result {
+                    Ok(result) => job.finish(self.ctx.events.clone(), result),
+                    Err(Error::Cancelled) => job.cancel(self.ctx.events.clone()),
+                    Err(error)
+                        if job.state != DownloadState::Cancelling && error.is_retryable() =>
+                    {
+                        if job.attempt >= job.request.config().retries() {
+                            warn!(%id, attempt = job.attempt, retries = job.request.config().retries(), error = %error, "Retry limit exceeded; failing job");
+                            job.fail(self.ctx.events.clone(), error);
+                            return;
+                        }
+                        let delay = BACKOFF_STRATEGY.next_delay(job.attempt);
+                        job.attempt += 1;
+                        job.state = DownloadState::Retrying;
+                        warn!(%id, attempt = job.attempt, delay_ms = delay.as_millis(), error = %error, "Retryable error; scheduling retry");
+                        job.retry(self.ctx.events.clone(), delay);
+                        self.jobs.insert(id, job);
+                        self.delayed.insert(id, delay);
                     }
-                    let delay = BACKOFF_STRATEGY.next_delay(job.attempt);
-                    job.attempt += 1;
-                    warn!(%id, attempt = job.attempt, delay_ms = delay.as_millis(), error = %error, "Retryable error; scheduling retry");
-                    job.retry(self.ctx.events.clone(), delay);
-                    self.delayed.insert(id, delay);
+                    Err(error) => job.fail(self.ctx.events.clone(), error),
                 }
-                Err(error) => {
-                    let Some(entry) = self.jobs.remove(&id) else {
-                        return;
-                    };
-                    error!(%id, error = %error, "Job failed with non-retryable error");
-                    entry.fail(self.ctx.events.clone(), error)
-                }
-            },
+            }
         }
     }
 
@@ -212,23 +203,47 @@ impl Scheduler {
                     result: Some(result_tx),
                     attempt: 0,
                     cancel_token,
+                    state: DownloadState::Queued,
                 });
             }
             SchedulerCmd::Cancel { id } => {
                 info!(%id, "Received cancel command");
-                self.jobs
-                    .remove(&id)
-                    .map(|job| job.cancel(self.ctx.events.clone()));
+                self.cancel_job(id);
             }
             SchedulerCmd::CancelAll => {
-                let jobs = std::mem::take(&mut self.jobs);
                 self.ready.clear();
                 self.delayed.clear();
 
-                for (_, job) in jobs {
-                    job.cancel(self.ctx.events.clone());
+                let ids: Vec<_> = self.jobs.keys().copied().collect();
+                for id in ids {
+                    self.cancel_job(id);
                 }
             }
+        }
+    }
+
+    fn cancel_job(&mut self, id: Uuid) {
+        let Some(job) = self.jobs.get_mut(&id) else {
+            return;
+        };
+
+        match job.state {
+            DownloadState::Queued | DownloadState::Retrying => {
+                let job = self.jobs.remove(&id).unwrap();
+                job.cancel(self.ctx.events.clone());
+            }
+            DownloadState::Running => {
+                job.state = DownloadState::Cancelling;
+                job.cancel_token.cancel();
+                let _ = self.ctx.events.send(Event::new(
+                    id,
+                    EventKind::Lifecycle {
+                        state: DownloadState::Cancelling,
+                    },
+                ));
+            }
+            DownloadState::Cancelling => {}
+            _ => {}
         }
     }
 
@@ -254,6 +269,14 @@ impl Scheduler {
                 continue;
             };
 
+            job.state = DownloadState::Running;
+            let _ = self.ctx.events.send(Event::new(
+                id,
+                EventKind::Lifecycle {
+                    state: DownloadState::Running,
+                },
+            ));
+
             let request = job.request.clone();
             let cancel_token = job.cancel_token.clone();
             let client = self.ctx.client.clone();
@@ -273,6 +296,7 @@ pub(crate) struct Job {
     attempt: u32,
     result: Option<oneshot::Sender<Result<DownloadResult, Error>>>,
     cancel_token: CancellationToken,
+    state: DownloadState,
 }
 
 impl Job {

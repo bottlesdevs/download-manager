@@ -44,6 +44,7 @@ pub(crate) enum SchedulerCmd {
     Cancel {
         id: Uuid,
     },
+    CancelAll,
 }
 
 pub(crate) struct Scheduler {
@@ -218,6 +219,15 @@ impl Scheduler {
                 self.jobs
                     .remove(&id)
                     .map(|job| job.cancel(self.ctx.events.clone()));
+            }
+            SchedulerCmd::CancelAll => {
+                let jobs = std::mem::take(&mut self.jobs);
+                self.ready.clear();
+                self.delayed.clear();
+
+                for (_, job) in jobs {
+                    job.cancel(self.ctx.events.clone());
+                }
             }
         }
     }

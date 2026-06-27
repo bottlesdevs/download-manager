@@ -11,7 +11,7 @@ use std::{
     path::Path,
     sync::{Arc, atomic::Ordering},
 };
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, info, instrument, trace, warn};
@@ -32,6 +32,12 @@ pub struct DownloadManager {
     ctx: Arc<Context>,
     tracker: TaskTracker,
     shutdown_token: CancellationToken,
+}
+
+impl Drop for DownloadManager {
+    fn drop(&mut self) {
+        self.shutdown_token.cancel();
+    }
 }
 
 impl Default for DownloadManager {
@@ -162,21 +168,6 @@ impl DownloadManager {
     pub fn cancel_all(&self) {
         info!("Cancelling all downloads");
         self.ctx.cancel_all();
-    }
-
-    /// Return a child [CancellationToken] tied to the manager's root token.
-    #[instrument(level = "trace", skip(self))]
-    pub fn child_token(&self) -> CancellationToken {
-        self.ctx.child_token()
-    }
-
-    /// Subscribe to all [DownloadEvent] notifications across the manager.
-    ///
-    /// The underlying broadcast channel has a bounded buffer (1024). Slow consumers may lag and
-    /// miss events. Consider using [DownloadManager::events()] for a stream that skips lagged messages gracefully.
-    #[instrument(level = "debug", skip(self))]
-    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
-        self.ctx.events.subscribe()
     }
 
     /// A fallible-safe stream of global [DownloadEvent] values.

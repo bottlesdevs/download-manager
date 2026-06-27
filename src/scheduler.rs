@@ -100,8 +100,14 @@ impl Scheduler {
     pub async fn run(mut self) {
         loop {
             tokio::select! {
-                Some(cmd) = self.cmd_rx.recv() => self.handle_cmd(cmd).await,
-                Some(msg) = self.worker_rx.recv() =>self.handle_worker_msg(msg).await,
+                cmd = self.cmd_rx.recv() => match cmd {
+                    Some(cmd) => self.handle_cmd(cmd).await,
+                    None => {
+                        info!("Scheduler command channel closed");
+                        break;
+                    }
+                },
+                Some(msg) = self.worker_rx.recv() => self.handle_worker_msg(msg).await,
                 expired = self.delayed.next(), if !self.delayed.is_empty() => {
                     if let Some(exp) = expired {
                         self.ready.push_back(exp.into_inner());

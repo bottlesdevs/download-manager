@@ -165,9 +165,9 @@ impl DownloadManager {
     ///
     /// This triggers cooperative cancellation for workers and removes partial files.
     #[instrument(level = "info", skip(self))]
-    pub fn cancel_all(&self) {
+    pub async fn cancel_all(&self) {
         info!("Cancelling all downloads");
-        self.ctx.cancel_all();
+        let _ = self.scheduler_tx.send(SchedulerCmd::CancelAll).await;
     }
 
     /// A fallible-safe stream of global [DownloadEvent] values.

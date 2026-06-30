@@ -123,7 +123,7 @@ impl ProgressTracker {
             ema_bps: 0.0,
             started_at: now,
             last_sample_at: now,
-            last_sample_bytes: 0,
+            last_sample_bytes: starting_bytes,
         }
     }
 

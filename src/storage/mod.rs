@@ -7,12 +7,27 @@ pub(crate) use manifest::Manifest;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
+use crate::error::Result;
+
 /// Bytes actually present in the `.part` file (0 if it is absent).
 pub(crate) async fn part_len(dest: &Path) -> u64 {
     fs::metadata(part_path(dest))
         .await
         .map(|m| m.len())
         .unwrap_or(0)
+}
+
+/// Terminal cleanup for a cancelled download: remove the `.part` and its
+/// manifest sidecar. Errors removing the `.part` propagate (so callers can
+/// report cleanup failure); a missing manifest is fine.
+pub(crate) async fn discard_partial(dest: &Path) -> Result<()> {
+    match fs::remove_file(part_path(dest)).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    let _ = fs::remove_file(manifest_path(dest)).await;
+    Ok(())
 }
 
 fn part_path(dest: &Path) -> PathBuf {

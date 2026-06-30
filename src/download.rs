@@ -38,15 +38,23 @@ impl Download {
         self.id
     }
 
-    /// Request cooperative cancellation of this download.
+    /// Request cancellation and wait for it to take terminal effect.
     ///
-    /// The scheduler/worker aborts the in-flight HTTP request and deletes any partially
-    /// written file. Cancellation is best-effort and may race with completion.
-    pub async fn cancel(&self) -> Result<()> {
+    /// Resolves only once the download has reached a terminal state and any
+    /// partial file/manifest has been removed (cleanup succeeded). Returns:
+    /// - `Ok(())` when the download is terminally cancelled, was already
+    ///   finished, or completed before cancellation could win the race.
+    /// - `Err(..)` if cleanup failed or the manager was shut down.
+    pub async fn cancel(self) -> Result<()> {
         self.cmd_tx
             .send(SchedulerCmd::Cancel { id: self.id })
             .await
-            .map_err(Error::from)
+            .map_err(Error::from)?;
+        match self.result.await.map_err(|_| Error::ManagerShutdown)? {
+            Err(Error::Cancelled) => Ok(()),
+            Ok(_) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     /// Stream of [DownloadEvent] values scoped to this download only.

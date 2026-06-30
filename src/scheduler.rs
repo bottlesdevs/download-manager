@@ -14,6 +14,7 @@ use crate::{
     DownloadResult, Error, Event, Request,
     context::Context,
     events::{DownloadState, EventKind},
+    storage,
     worker::{WorkerMsg, run},
 };
 
@@ -135,7 +136,7 @@ impl Scheduler {
     async fn handle_worker_msg(&mut self, msg: WorkerMsg) {
         match msg {
             WorkerMsg::Metadata { id, info } => {
-                if let Some(_) = self.jobs.get(&id) {
+                if self.jobs.contains_key(&id) {
                     let _ = self
                         .ctx
                         .events
@@ -148,7 +149,7 @@ impl Scheduler {
                 total_bytes,
                 ..
             } => {
-                if let Some(_) = self.jobs.get(&id) {
+                if self.jobs.contains_key(&id) {
                     let _ = self.ctx.events.send(Event::new(
                         id,
                         EventKind::Progress {
@@ -165,6 +166,7 @@ impl Scheduler {
 
                 match result {
                     Ok(result) => job.finish(self.ctx.events.clone(), result),
+                    // Worker already discarded the partial before reporting Cancelled.
                     Err(Error::Cancelled) => job.cancel(self.ctx.events.clone()),
                     Err(error)
                         if job.state != DownloadState::Cancelling && error.is_retryable() =>
@@ -208,7 +210,7 @@ impl Scheduler {
             }
             SchedulerCmd::Cancel { id } => {
                 info!(%id, "Received cancel command");
-                self.cancel_job(id);
+                self.cancel_job(id).await;
             }
             SchedulerCmd::CancelAll => {
                 self.ready.clear();
@@ -216,13 +218,13 @@ impl Scheduler {
 
                 let ids: Vec<_> = self.jobs.keys().copied().collect();
                 for id in ids {
-                    self.cancel_job(id);
+                    self.cancel_job(id).await;
                 }
             }
         }
     }
 
-    fn cancel_job(&mut self, id: Uuid) {
+    async fn cancel_job(&mut self, id: Uuid) {
         let Some(job) = self.jobs.get_mut(&id) else {
             return;
         };
@@ -230,7 +232,12 @@ impl Scheduler {
         match job.state {
             DownloadState::Queued | DownloadState::Retrying => {
                 let job = self.jobs.remove(&id).unwrap();
-                job.cancel(self.ctx.events.clone());
+                let cleanup = storage::discard_partial(job.request.destination()).await;
+                if let Err(error) = cleanup {
+                    job.fail(self.ctx.events.clone(), error);
+                } else {
+                    job.cancel(self.ctx.events.clone());
+                }
             }
             DownloadState::Running => {
                 job.state = DownloadState::Cancelling;

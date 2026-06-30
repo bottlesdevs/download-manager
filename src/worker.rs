@@ -181,7 +181,12 @@ async fn send_get(
 
     tokio::select! {
         resp = builder.send() => Ok(resp?),
-        _ = cancel_token.cancelled() => Err(Error::Cancelled),
+        _ = cancel_token.cancelled() => {
+            // Cancelled before any PartFile is open; clear any leftover `.part`
+            // from a prior run so "cleanup succeeded" holds on this path too.
+            storage::discard_partial(request.destination()).await?;
+            Err(Error::Cancelled)
+        }
     }
 }
 

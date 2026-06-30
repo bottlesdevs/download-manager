@@ -13,8 +13,7 @@ use crate::error::Result;
 pub(crate) struct PartFile {
     dest: PathBuf,
     file: File,
-    written: u64,
-    durable: u64,
+    dirty: bool,
     manifest: Manifest,
 }
 
@@ -43,43 +42,40 @@ impl PartFile {
         Ok(Self {
             dest: dest.to_path_buf(),
             file,
-            written: offset,
-            durable: offset,
+            dirty: false,
             manifest,
         })
     }
 
     /// Sequential append at the current write position.
     pub async fn write(&mut self, buf: &[u8]) -> Result<()> {
-        self.write_at(self.written, buf).await
-    }
-
-    /// Write `bytes` at `offset`. Single-stream callers pass `offset == written`;
-    /// a mismatch seeks first (positioned writes for future multi-segment).
-    pub async fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<()> {
-        if offset != self.written {
-            self.file.seek(SeekFrom::Start(offset)).await?;
-            self.written = offset;
-        }
-        self.file.write_all(bytes).await?;
-        self.written += bytes.len() as u64;
-        if self.written - self.durable >= Self::CHECKPOINT_BYTES {
+        self.file.write_all(buf).await?;
+        self.dirty = true;
+        let written = self.file.stream_position().await?;
+        if written.saturating_sub(self.manifest.resume_offset()) >= Self::CHECKPOINT_BYTES {
             self.checkpoint().await?;
         }
         Ok(())
     }
 
+    /// Write `bytes` at `offset` (positioned writes for future multi-segment).
+    pub async fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<()> {
+        self.file.seek(SeekFrom::Start(offset)).await?;
+        self.write(bytes).await
+    }
+
     /// fsync the data, then persist the manifest with the synced offset. The
     /// order matters: `completed_ranges` must never exceed the durable bytes.
     pub async fn checkpoint(&mut self) -> Result<()> {
-        if self.written == self.durable {
+        if !self.dirty {
             return Ok(());
         }
+        let written = self.file.stream_position().await?;
         self.file.sync_data().await?;
-        self.manifest.set_contiguous(self.written);
+        self.manifest.set_contiguous(written);
         self.manifest.save(&self.dest).await?;
-        self.durable = self.written;
-        trace!(downloaded = self.durable, "Checkpointed manifest");
+        self.dirty = false;
+        trace!(downloaded = written, "Checkpointed manifest");
         Ok(())
     }
 

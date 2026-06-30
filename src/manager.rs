@@ -88,7 +88,13 @@ impl DownloadManager {
         self.enqueue(request)
     }
 
-    fn enqueue(&self, request: Request) -> Result<Download> {
+    /// Enqueue a download request.
+    ///
+    /// - Returns a [Download] handle which is also a Future yielding [DownloadResult] or Error.
+    /// - You can stream progress and per-download events from the returned handle.
+    /// - Cancellation: call [Download::cancel()] on the handle, or [DownloadManager::cancel(id)].
+    #[instrument(level = "info", skip(self, request))]
+    pub fn enqueue(&self, request: Request) -> Result<Download> {
         let id = request.id();
         let event_rx = self.ctx.events.subscribe();
         let (result_tx, result_rx) = oneshot::channel();

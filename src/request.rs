@@ -81,7 +81,7 @@ impl DownloadConfig {
         self.overwrite
     }
 
-    /// Additional headers applied startto both the HEAD probe and the GET request.
+    /// Additional headers applied to the download GET request.
     pub fn headers(&self) -> &HeaderMap {
         &self.headers
     }

@@ -5,6 +5,7 @@ mod events;
 mod manager;
 mod request;
 mod scheduler;
+mod storage;
 mod worker;
 
 pub use download::{Download, DownloadResult};

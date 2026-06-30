@@ -88,7 +88,7 @@ pub struct DownloadResult {
 }
 
 #[derive(Debug, Clone)]
-/// Remote metadata obtained via a best-effort `HEAD` probe prior to downloading.
+/// Remote metadata observed from the download response.
 /// Availability depends on server support; fields are None when not provided.
 pub struct RemoteInfo {
     pub content_length: Option<u64>,

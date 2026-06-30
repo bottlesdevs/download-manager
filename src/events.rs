@@ -81,7 +81,7 @@ impl std::fmt::Display for EventKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EventKind::Lifecycle { state } => write!(f, "Lifecycle: {}", state),
-            EventKind::Metadata { info } => write!(f, "Probed: {:?}", info),
+            EventKind::Metadata { info } => write!(f, "Metadata: {:?}", info),
             EventKind::Progress {
                 bytes_downloaded,
                 total_bytes,

@@ -33,34 +33,12 @@ pub(crate) enum WorkerMsg {
     },
 }
 
-#[instrument(level = "info", skip(request, client, worker_tx, cancel_token), fields(id = %request.id(), url = %request.url()))]
+#[instrument(level = "info", skip(request, client, cancel_token, worker_tx), fields(id = %request.id(), url = %request.url(), destination = ?request.destination()))]
 pub(crate) async fn run(
     request: Arc<Request>,
     client: Client,
     worker_tx: mpsc::Sender<WorkerMsg>,
     cancel_token: CancellationToken,
-) {
-    let result = attempt_download(request.as_ref(), client, cancel_token, worker_tx.clone()).await;
-    if result.is_ok() {
-        info!(id = %request.id(), "Download attempt finished successfully");
-    } else {
-        warn!(id = %request.id(), "Download attempt finished with error");
-    }
-
-    let _ = worker_tx
-        .send(WorkerMsg::Finish {
-            id: request.id(),
-            result,
-        })
-        .await;
-}
-
-#[instrument(level = "info", skip(request, client, cancel_token, worker_tx), fields(id = %request.id(), url = %request.url(), destination = ?request.destination()))]
-pub(crate) async fn attempt_download(
-    request: &Request,
-    client: Client,
-    cancel_token: CancellationToken,
-    worker_tx: mpsc::Sender<WorkerMsg>,
 ) -> Result<DownloadResult, Error> {
     let dest = request.destination();
 
@@ -84,10 +62,10 @@ pub(crate) async fn attempt_download(
 
     // The GET is the source of truth: ask for the range we want and let the
     // response status decide. 416 means our offset is stale/complete -> restart.
-    let mut response = send_get(request, &client, offset, prior.as_ref(), &cancel_token).await?;
+    let mut response = send_get(&request, &client, offset, prior.as_ref(), &cancel_token).await?;
     if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
         debug!(offset, "Range not satisfiable; restarting from 0");
-        response = send_get(request, &client, 0, None, &cancel_token).await?;
+        response = send_get(&request, &client, 0, None, &cancel_token).await?;
     }
 
     // 206 -> server honored the range (resume); anything else (200) -> full body.

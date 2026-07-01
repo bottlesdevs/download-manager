@@ -293,7 +293,8 @@ impl Scheduler {
             info!(%id, "Dispatching job to worker");
             self.tracker.spawn(async move {
                 let _guard = guard;
-                run(request, client, worker_tx, cancel_token).await;
+                let result = run(request, client, worker_tx.clone(), cancel_token).await;
+                let _ = worker_tx.send(WorkerMsg::Finish { id, result }).await;
             });
         }
     }

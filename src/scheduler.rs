@@ -1,13 +1,14 @@
 use std::{
     collections::{HashMap, VecDeque},
+    panic::AssertUnwindSafe,
     sync::Arc,
     time::Duration,
 };
 
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::{sync::CancellationToken, task::TaskTracker, time::DelayQueue};
-use tracing::{debug, info, instrument, trace, warn};
+use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -50,7 +51,7 @@ pub(crate) enum SchedulerCmd {
 
 pub(crate) struct Scheduler {
     ctx: Arc<Context>,
-    tracker: TaskTracker,
+    max_concurrent: usize,
     shutdown_token: CancellationToken,
 
     cmd_rx: mpsc::Receiver<SchedulerCmd>,
@@ -60,20 +61,21 @@ pub(crate) struct Scheduler {
     jobs: HashMap<Uuid, Job>,
     ready: VecDeque<Uuid>,
     delayed: DelayQueue<Uuid>,
+    workers: TaskTracker,
 }
 
 impl Scheduler {
-    #[instrument(level = "info", skip(ctx, tracker, cmd_rx, shutdown_token))]
+    #[instrument(level = "info", skip(ctx, cmd_rx, shutdown_token))]
     pub fn new(
+        max_concurrent: usize,
         shutdown_token: CancellationToken,
         ctx: Arc<Context>,
-        tracker: TaskTracker,
         cmd_rx: mpsc::Receiver<SchedulerCmd>,
     ) -> Self {
         let (worker_tx, worker_rx) = mpsc::channel(1024);
         Self {
             ctx,
-            tracker,
+            max_concurrent,
             shutdown_token,
             cmd_rx,
             worker_tx,
@@ -81,6 +83,7 @@ impl Scheduler {
             ready: VecDeque::new(),
             delayed: DelayQueue::new(),
             jobs: HashMap::new(),
+            workers: TaskTracker::new(),
         }
     }
 
@@ -107,13 +110,11 @@ impl Scheduler {
                     None => break,
                 },
                 Some(msg) = self.worker_rx.recv() => self.handle_worker_msg(msg).await,
-                expired = self.delayed.next(), if !self.delayed.is_empty() => {
-                    if let Some(exp) = expired {
-                        let id = exp.into_inner();
-                        if let Some(job) = self.jobs.get_mut(&id) {
-                            job.state = DownloadState::Queued;
-                            self.ready.push_back(id);
-                        }
+                Some(expired) = self.delayed.next() => {
+                    let id = expired.into_inner();
+                    if let Some(job) = self.jobs.get_mut(&id) {
+                        job.state = DownloadState::Queued;
+                        self.ready.push_back(id);
                     }
                 }
                 _ = self.shutdown_token.cancelled() => break,
@@ -124,11 +125,9 @@ impl Scheduler {
         self.cmd_rx.close();
         self.handle_cmd(SchedulerCmd::CancelAll).await;
 
-        // Drain active workers and preserve their real results.
         while !self.jobs.is_empty() {
-            match self.worker_rx.recv().await {
-                Some(msg) => self.handle_worker_msg(msg).await,
-                None => break,
+            if let Some(msg) = self.worker_rx.recv().await {
+                self.handle_worker_msg(msg).await;
             }
         }
     }
@@ -160,34 +159,33 @@ impl Scheduler {
                     ));
                 }
             }
-            WorkerMsg::Finish { id, result } => {
-                let Some(mut job) = self.jobs.remove(&id) else {
-                    return;
-                };
+            WorkerMsg::Finish { id, result } => self.handle_worker_result(id, result),
+        }
+    }
 
-                match result {
-                    Ok(result) => job.finish(self.ctx.events.clone(), result),
-                    // Worker already discarded the partial before reporting Cancelled.
-                    Err(Error::Cancelled) => job.cancel(self.ctx.events.clone()),
-                    Err(error)
-                        if job.state != DownloadState::Cancelling && error.is_retryable() =>
-                    {
-                        if job.attempt >= job.request.config().retries() {
-                            warn!(%id, attempt = job.attempt, retries = job.request.config().retries(), error = %error, "Retry limit exceeded; failing job");
-                            job.fail(self.ctx.events.clone(), error);
-                            return;
-                        }
-                        let delay = BACKOFF_STRATEGY.next_delay(job.attempt);
-                        job.attempt += 1;
-                        job.state = DownloadState::Retrying;
-                        warn!(%id, attempt = job.attempt, delay_ms = delay.as_millis(), error = %error, "Retryable error; scheduling retry");
-                        job.retry(self.ctx.events.clone(), delay);
-                        self.jobs.insert(id, job);
-                        self.delayed.insert(id, delay);
-                    }
-                    Err(error) => job.fail(self.ctx.events.clone(), error),
+    fn handle_worker_result(&mut self, id: Uuid, result: Result<DownloadResult>) {
+        let Some(mut job) = self.jobs.remove(&id) else {
+            return;
+        };
+
+        match result {
+            Ok(result) => job.finish(self.ctx.events.clone(), result),
+            Err(Error::Cancelled) => job.cancel(self.ctx.events.clone()),
+            Err(error) if job.state != DownloadState::Cancelling && error.is_retryable() => {
+                if job.attempt >= job.request.config().retries() {
+                    warn!(%id, attempt = job.attempt, retries = job.request.config().retries(), error = %error, "Retry limit exceeded; failing job");
+                    job.fail(self.ctx.events.clone(), error);
+                    return;
                 }
+                let delay = BACKOFF_STRATEGY.next_delay(job.attempt);
+                job.attempt += 1;
+                job.state = DownloadState::Retrying;
+                warn!(%id, attempt = job.attempt, delay_ms = delay.as_millis(), error = %error, "Retryable error; scheduling retry");
+                job.retry(self.ctx.events.clone(), delay);
+                self.jobs.insert(id, job);
+                self.delayed.insert(id, delay);
             }
+            Err(error) => job.fail(self.ctx.events.clone(), error),
         }
     }
 
@@ -257,23 +255,15 @@ impl Scheduler {
 
     #[instrument(level = "trace", skip(self))]
     fn try_dispatch(&mut self) {
-        while let Some(id) = self.ready.pop_front() {
+        while self.workers.len() < self.max_concurrent {
+            let Some(id) = self.ready.pop_front() else {
+                break;
+            };
             if self.shutdown_token.is_cancelled() {
                 return;
             }
-            let guard = match self.ctx.active_guard() {
-                Ok(g) => g,
-                Err(_) => {
-                    // No permits left; put the job back to the front and stop dispatching for now.
-                    trace!(%id, "No semaphore permits available; requeuing to front");
-                    self.ready.push_front(id);
-                    return;
-                }
-            };
 
             let Some(job) = self.jobs.get_mut(&id) else {
-                drop(guard);
-                trace!(%id, "Job not found when dispatching");
                 continue;
             };
 
@@ -289,11 +279,16 @@ impl Scheduler {
             let cancel_token = job.cancel_token.clone();
             let client = self.ctx.client.clone();
             let worker_tx = self.worker_tx.clone();
+            let token = self.workers.token();
 
             info!(%id, "Dispatching job to worker");
-            self.tracker.spawn(async move {
-                let _guard = guard;
-                let result = run(request, client, worker_tx.clone(), cancel_token).await;
+            tokio::spawn(async move {
+                let result =
+                    AssertUnwindSafe(run(request, client, worker_tx.clone(), cancel_token))
+                        .catch_unwind()
+                        .await
+                        .unwrap_or_else(|_| Err(Error::Unknown("Download worker panicked".into())));
+                drop(token);
                 let _ = worker_tx.send(WorkerMsg::Finish { id, result }).await;
             });
         }

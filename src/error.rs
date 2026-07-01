@@ -32,10 +32,6 @@ pub enum Error {
     CommandQueueFull,
     #[error("Download manager command channel is closed")]
     CommandChannelClosed,
-    #[error("No download concurrency permits are available")]
-    NoConcurrencyPermits,
-    #[error("Download concurrency limiter is closed")]
-    ConcurrencyLimiterClosed,
     #[error("Invalid URL: {0}")]
     InvalidUrl(String),
     #[error("Unknown error: {0}")]
@@ -77,15 +73,6 @@ impl<T> From<tokio::sync::mpsc::error::TrySendError<T>> for Error {
         match error {
             tokio::sync::mpsc::error::TrySendError::Full(_) => Self::CommandQueueFull,
             tokio::sync::mpsc::error::TrySendError::Closed(_) => Self::CommandChannelClosed,
-        }
-    }
-}
-
-impl From<tokio::sync::TryAcquireError> for Error {
-    fn from(error: tokio::sync::TryAcquireError) -> Self {
-        match error {
-            tokio::sync::TryAcquireError::NoPermits => Self::NoConcurrencyPermits,
-            tokio::sync::TryAcquireError::Closed => Self::ConcurrencyLimiterClosed,
         }
     }
 }

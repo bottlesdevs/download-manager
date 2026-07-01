@@ -197,3 +197,32 @@ impl ProgressTracker {
         self.last_sample_bytes = self.bytes;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn samples_after_byte_threshold() {
+        let mut tracker = ProgressTracker::new(0, None);
+
+        assert!(!tracker.add(1024));
+        assert!(tracker.add(ProgressTracker::MIN_SAMPLE_BYTES - 1024));
+        assert_eq!(tracker.bytes(), ProgressTracker::MIN_SAMPLE_BYTES);
+        assert_eq!(tracker.total(), None);
+        assert_eq!(tracker.percent(), None);
+        assert_eq!(tracker.eta(), None);
+    }
+
+    #[test]
+    fn resumed_progress_updates_rate_percent_and_eta() {
+        let mut tracker = ProgressTracker::new(25, Some(100));
+        tracker.last_sample_at = Instant::now() - Duration::from_secs(1);
+
+        assert!(tracker.add(25));
+        assert_eq!(tracker.bytes(), 50);
+        assert_eq!(tracker.percent(), Some(50.0));
+        assert!(tracker.rate_bps() > 0.0);
+        assert!(tracker.eta().is_some());
+    }
+}

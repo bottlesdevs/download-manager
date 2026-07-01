@@ -84,6 +84,10 @@ impl Manifest {
     pub fn validator(&self) -> Option<&str> {
         self.etag.as_deref().or(self.last_modified.as_deref())
     }
+
+    pub fn is_resumable_for(&self, url: &str) -> bool {
+        self.url == url && self.resume_offset() > 0 && self.validator().is_some()
+    }
 }
 
 #[cfg(test)]
@@ -99,5 +103,64 @@ mod tests {
         assert_eq!(m.resume_offset(), 0);
         m.set_contiguous(40);
         assert_eq!(m.resume_offset(), 40);
+    }
+
+    #[test]
+    fn resume_offset_stops_at_first_gap_regardless_of_range_order() {
+        let manifest = Manifest {
+            completed_ranges: vec![
+                ByteRange { start: 40, end: 80 },
+                ByteRange { start: 0, end: 20 },
+                ByteRange {
+                    start: 90,
+                    end: 100,
+                },
+                ByteRange { start: 20, end: 40 },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(manifest.resume_offset(), 80);
+    }
+
+    #[test]
+    fn validator_prefers_etag_then_last_modified() {
+        let mut manifest = Manifest {
+            etag: Some("\"v1\"".into()),
+            last_modified: Some("Mon, 01 Jan 2024 00:00:00 GMT".into()),
+            ..Default::default()
+        };
+
+        assert_eq!(manifest.validator(), Some("\"v1\""));
+        manifest.etag = None;
+        assert_eq!(manifest.validator(), Some("Mon, 01 Jan 2024 00:00:00 GMT"));
+    }
+
+    #[test]
+    fn resume_requires_matching_url_prefix_and_validator() {
+        let mut manifest = Manifest {
+            url: "https://example.com/file".into(),
+            etag: Some("\"v1\"".into()),
+            ..Default::default()
+        };
+        manifest.set_contiguous(10);
+
+        assert!(manifest.is_resumable_for("https://example.com/file"));
+        assert!(!manifest.is_resumable_for("https://example.com/other"));
+
+        manifest.etag = None;
+        assert!(!manifest.is_resumable_for("https://example.com/file"));
+    }
+
+    #[tokio::test]
+    async fn corrupt_manifest_is_treated_as_absent() {
+        let dir = std::env::temp_dir().join(format!("dm-manifest-test-{}", uuid::Uuid::new_v4()));
+        let dest = dir.join("file.bin");
+        fs::create_dir_all(&dir).await.unwrap();
+        fs::write(manifest_path(&dest), b"not-json").await.unwrap();
+
+        assert!(Manifest::load(&dest).await.is_none());
+
+        let _ = fs::remove_dir_all(dir).await;
     }
 }

@@ -51,7 +51,7 @@ pub(crate) async fn run(
     // disk (clamp against the real `.part` length, never trust the manifest alone).
     let prior = Manifest::load(dest)
         .await
-        .filter(|m| m.resume_offset() > 0 && m.validator().is_some());
+        .filter(|manifest| manifest.is_resumable_for(request.url().as_str()));
     let offset = match &prior {
         Some(m) => m.resume_offset().min(storage::part_len(dest).await?),
         None => 0,

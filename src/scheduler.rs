@@ -121,6 +121,7 @@ impl Scheduler {
                 }
                 _ = self.shutdown_token.cancelled() => {
                     info!("Scheduler shutdown requested");
+                    self.cmd_rx.close();
                     break;
                 },
             }

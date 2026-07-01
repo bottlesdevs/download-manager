@@ -179,3 +179,24 @@ impl Default for DownloadManagerConfig {
         Self { max_concurrent: 3 }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dropping_manager_stops_scheduler() {
+        let context = {
+            let manager = DownloadManager::default();
+            Arc::downgrade(&manager.ctx)
+        };
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while context.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("scheduler should release its context after manager drop");
+    }
+}

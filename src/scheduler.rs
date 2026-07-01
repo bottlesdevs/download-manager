@@ -11,7 +11,7 @@ use tracing::{debug, info, instrument, trace, warn};
 use uuid::Uuid;
 
 use crate::{
-    DownloadResult, Error, Event, Request,
+    DownloadResult, Error, Event, Request, Result,
     context::Context,
     events::{DownloadState, EventKind},
     storage,
@@ -38,8 +38,8 @@ static BACKOFF_STRATEGY: ExponentialBackoff = ExponentialBackoff {
 
 pub(crate) enum SchedulerCmd {
     Enqueue {
-        request: Request,
-        result_tx: oneshot::Sender<Result<DownloadResult, Error>>,
+        request: Arc<Request>,
+        result_tx: oneshot::Sender<Result<DownloadResult>>,
         cancel_token: CancellationToken,
     },
     Cancel {
@@ -202,7 +202,7 @@ impl Scheduler {
                 let id = request.id();
                 debug!(%id, url = %request.url(), destination = ?request.destination(), "Enqueue request");
                 self.schedule(Job {
-                    request: Arc::new(request),
+                    request: request,
                     result: Some(result_tx),
                     attempt: 0,
                     cancel_token,
@@ -303,7 +303,7 @@ impl Scheduler {
 pub(crate) struct Job {
     request: Arc<Request>,
     attempt: u32,
-    result: Option<oneshot::Sender<Result<DownloadResult, Error>>>,
+    result: Option<oneshot::Sender<Result<DownloadResult>>>,
     cancel_token: CancellationToken,
     state: DownloadState,
 }
@@ -313,7 +313,7 @@ impl Job {
         self.request.id()
     }
 
-    fn send_result(self, result: Result<DownloadResult, Error>) {
+    fn send_result(self, result: Result<DownloadResult>) {
         if let Some(result_tx) = self.result {
             let _ = result_tx.send(result);
         }

@@ -101,7 +101,7 @@ impl DownloadManager {
         let cancel_token = self.ctx.child_token();
 
         self.scheduler_tx.try_send(SchedulerCmd::Enqueue {
-            request,
+            request: Arc::new(request),
             result_tx,
             cancel_token: cancel_token.clone(),
         })?;

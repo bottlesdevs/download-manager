@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::{
     DownloadResult, Error, Event, Request, Result,
     context::Context,
+    error::ResultExt,
     events::{DownloadState, EventKind},
     storage,
     worker::{WorkerMsg, run},
@@ -109,7 +110,7 @@ impl Scheduler {
                 },
                 Some(msg) = self.worker_rx.recv() => self.handle_worker_msg(msg).await,
                 Some(result) = self.workers.join_next() => {
-                    self.handle_worker_join(result.map_err(Error::from));
+                    result.log_warn().map(|(id, result)| self.handle_worker_result(id, result.map_err(Error::from)));
                 }
                 Some(expired) = self.delayed.next() => {
                     let id = expired.into_inner();
@@ -130,7 +131,7 @@ impl Scheduler {
             tokio::select! {
                 Some(msg) = self.worker_rx.recv() => self.handle_worker_msg(msg).await,
                 Some(result) = self.workers.join_next() => {
-                    self.handle_worker_join(result.map_err(Error::from));
+                    result.log_warn().map(|(id, result)| self.handle_worker_result(id, result.map_err(Error::from)));
                 }
             }
         }
@@ -163,13 +164,6 @@ impl Scheduler {
                     ));
                 }
             }
-        }
-    }
-
-    fn handle_worker_join(&mut self, result: Result<(Uuid, Result<DownloadResult>)>) {
-        match result {
-            Ok((id, result)) => self.handle_worker_result(id, result),
-            Err(error) => warn!(%error, "Worker task failed to join"),
         }
     }
 

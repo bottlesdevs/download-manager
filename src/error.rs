@@ -4,6 +4,32 @@ use tracing::instrument;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[allow(dead_code)]
+pub(crate) trait ResultExt<T, E> {
+    fn log_error(self) -> Option<T>;
+    fn log_warn(self) -> Option<T>;
+    fn log_info(self) -> Option<T>;
+    fn log_debug(self) -> Option<T>;
+}
+
+impl<T, E: std::error::Error> ResultExt<T, E> for std::result::Result<T, E> {
+    fn log_error(self) -> Option<T> {
+        self.inspect_err(|error| tracing::error!(%error)).ok()
+    }
+
+    fn log_warn(self) -> Option<T> {
+        self.inspect_err(|error| tracing::warn!(%error)).ok()
+    }
+
+    fn log_info(self) -> Option<T> {
+        self.inspect_err(|error| tracing::info!(%error)).ok()
+    }
+
+    fn log_debug(self) -> Option<T> {
+        self.inspect_err(|error| tracing::debug!(%error)).ok()
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("Network error: {0}")]

@@ -5,7 +5,7 @@ use tokio::fs;
 use tracing::warn;
 
 use super::manifest_path;
-use crate::{Error, Result};
+use crate::{Error, Result, error::ResultExt};
 
 /// A half-open byte range `[start, end)` written to the `.part` file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,7 +30,10 @@ impl Manifest {
     /// Load the manifest sibling for `dest`. A missing, unreadable, or torn
     /// manifest is treated as absent so the caller restarts cleanly.
     pub async fn load(dest: &Path) -> Option<Manifest> {
-        let bytes = fs::read(manifest_path(dest)).await.ok()?;
+        let bytes = match fs::read(manifest_path(dest)).await {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            result => result.log_warn()?,
+        };
         match serde_json::from_slice(&bytes) {
             Ok(manifest) => Some(manifest),
             Err(e) => {

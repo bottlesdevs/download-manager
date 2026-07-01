@@ -1,4 +1,4 @@
-use crate::{Error, Event, Result, scheduler::SchedulerCmd};
+use crate::{Error, Event, Result, error::ResultExt, scheduler::SchedulerCmd};
 use futures_core::Stream;
 use std::path::PathBuf;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -66,7 +66,7 @@ impl Download {
 
         let download_id = self.id;
         BroadcastStream::new(self.events.resubscribe())
-            .filter_map(|res| res.ok())
+            .filter_map(|result| result.log_warn())
             .filter(move |event| event.id() == download_id)
     }
 }

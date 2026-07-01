@@ -1,6 +1,7 @@
 use crate::{
     Download, Event, Request, Result,
     context::Context,
+    error::ResultExt,
     request::RequestBuilder,
     scheduler::{Scheduler, SchedulerCmd},
 };
@@ -137,7 +138,11 @@ impl DownloadManager {
     #[instrument(level = "info", skip(self))]
     pub async fn cancel_all(&self) {
         info!("Cancelling all downloads");
-        let _ = self.scheduler_tx.send(SchedulerCmd::CancelAll).await;
+        let _ = self
+            .scheduler_tx
+            .send(SchedulerCmd::CancelAll)
+            .await
+            .log_warn();
     }
 
     /// A fallible-safe stream of global [DownloadEvent] values.
@@ -145,7 +150,7 @@ impl DownloadManager {
     /// Internally wraps the broadcast receiver and filters out lagged/closed errors.
     #[instrument(level = "debug", skip(self))]
     pub fn events(&self) -> impl Stream<Item = Event> + 'static {
-        BroadcastStream::new(self.ctx.events.subscribe()).filter_map(|r| r.ok())
+        BroadcastStream::new(self.ctx.events.subscribe()).filter_map(|result| result.log_warn())
     }
 
     /// Gracefully stop the manager.
@@ -157,9 +162,7 @@ impl DownloadManager {
     pub async fn shutdown(mut self) {
         info!("Shutting down DownloadManager");
         self.ctx.cancel_root.cancel();
-        if let Err(error) = (&mut self.scheduler).await {
-            warn!(%error, "Download manager scheduler failed");
-        }
+        let _ = (&mut self.scheduler).await.log_warn();
         info!("DownloadManager shutdown complete");
     }
 }

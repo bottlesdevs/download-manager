@@ -10,11 +10,12 @@ use tokio::fs;
 use crate::Result;
 
 /// Bytes actually present in the `.part` file (0 if it is absent).
-pub(crate) async fn part_len(dest: &Path) -> u64 {
-    fs::metadata(part_path(dest))
-        .await
-        .map(|m| m.len())
-        .unwrap_or(0)
+pub(crate) async fn part_len(dest: &Path) -> Result<u64> {
+    match fs::metadata(part_path(dest)).await {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Terminal cleanup for a cancelled download: remove the `.part` and its
@@ -71,10 +72,10 @@ mod tests {
             let loaded = Manifest::load(&dest).await.unwrap();
             assert_eq!(loaded.resume_offset(), 5);
             assert!(loaded.validator().is_some());
-            assert_eq!(part_len(&dest).await, 5);
+            assert_eq!(part_len(&dest).await.unwrap(), 5);
 
             // Resume from the recorded offset, append, finalize.
-            let offset = loaded.resume_offset().min(part_len(&dest).await);
+            let offset = loaded.resume_offset().min(part_len(&dest).await.unwrap());
             let mut part = PartFile::open(&dest, offset, loaded).await.unwrap();
             part.write(b"world").await.unwrap();
             let path = part.finalize().await.unwrap();
@@ -82,7 +83,7 @@ mod tests {
             assert_eq!(fs::read(&path).await.unwrap(), b"helloworld");
             // Finalize cleans up the sidecars.
             assert!(Manifest::load(&dest).await.is_none());
-            assert_eq!(part_len(&dest).await, 0);
+            assert_eq!(part_len(&dest).await.unwrap(), 0);
 
             let _ = fs::remove_dir_all(&dir).await;
         });

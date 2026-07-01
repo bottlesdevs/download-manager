@@ -6,7 +6,7 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tracing::trace;
 
 use super::{Manifest, discard_partial, manifest_path, part_path};
-use crate::Result;
+use crate::{Result, error::ResultExt};
 
 /// The `<dest>.part` file plus its durable manifest. Writes always target the
 /// `.part`; the final destination only appears via an atomic rename on success.
@@ -85,7 +85,7 @@ impl PartFile {
         file.sync_all().await?;
         drop(file);
         fs::rename(part_path(&dest), &dest).await?;
-        let _ = fs::remove_file(manifest_path(&dest)).await;
+        let _ = fs::remove_file(manifest_path(&dest)).await.log_debug();
         Ok(dest)
     }
 

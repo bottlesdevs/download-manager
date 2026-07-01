@@ -7,9 +7,8 @@ use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::{
-    Error, Result,
     download::RemoteInfo,
-    error::ResultExt,
+    error::{Error, Result, ResultExt},
     events::ProgressTracker,
     prelude::DownloadResult,
     request::Request,
@@ -40,7 +39,7 @@ pub(crate) async fn run(
     let dest = request.destination();
 
     // `overwrite` guards the *final* path; partial data lives in `<dest>.part`.
-    if tokio::fs::try_exists(dest).await? && !request.config().overwrite() {
+    if tokio::fs::try_exists(dest).await? && !request.config.overwrite() {
         warn!(?dest, "Destination exists and overwrite=false; failing");
         return Err(Error::FileExists {
             path: dest.to_path_buf(),
@@ -146,7 +145,7 @@ async fn send_get(
 ) -> Result<Response> {
     let mut builder = client
         .request(Method::GET, request.url().as_ref())
-        .headers(request.config().headers().clone());
+        .headers(request.config.headers().clone());
 
     if offset > 0 {
         builder = builder.header(header::RANGE, format!("bytes={offset}-"));

@@ -13,10 +13,11 @@ use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::{
-    DownloadResult, Error, Event, Request, Result,
     context::Context,
-    error::ResultExt,
-    events::{DownloadState, EventKind},
+    download::DownloadResult,
+    error::{Error, Result, ResultExt},
+    events::{DownloadState, Event, EventKind},
+    request::Request,
     storage,
     worker::{WorkerMsg, run},
 };
@@ -180,8 +181,8 @@ impl Scheduler {
             Ok(result) => job.finish(self.ctx.events.clone(), result),
             Err(Error::Cancelled) => job.cancel(self.ctx.events.clone()),
             Err(error) if job.state != DownloadState::Cancelling && error.is_retryable() => {
-                if job.attempt >= job.request.config().retries() {
-                    warn!(%id, attempt = job.attempt, retries = job.request.config().retries(), error = %error, "Retry limit exceeded; failing job");
+                if job.attempt >= job.request.config.retries() {
+                    warn!(%id, attempt = job.attempt, retries = job.request.config.retries(), error = %error, "Retry limit exceeded; failing job");
                     job.fail(self.ctx.events.clone(), error);
                     return;
                 }

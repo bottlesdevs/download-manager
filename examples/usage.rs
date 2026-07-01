@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use download_manager::{DownloadManager, prelude::*};
+use download_manager::prelude::*;
 use futures_util::StreamExt;
 use reqwest::Url;
 // use std::fmt::Debug;
@@ -25,7 +25,7 @@ fn init_tracing() {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     init_tracing();
 
     let manager = DownloadManager::default();
@@ -36,31 +36,25 @@ async fn main() -> anyhow::Result<()> {
     // Start the download
     let download = manager.download(url, &destination)?;
 
-    // Subscribe to per-download progress
-    let mut progress_stream = download.progress();
-    tokio::spawn(async move {
-        while let Some(p) = progress_stream.next().await {
-            let pct = p
-                .percent()
-                .map(|v| format!("{v:.1}%"))
-                .unwrap_or_else(|| "?".into());
-            info!(
-                bytes = p.bytes_downloaded,
-                total = p.total_bytes.map(|v| v as i64).unwrap_or(-1),
-                instantaneous_bps = (p.instantaneous_bps as u64),
-                ema_bps = (p.ema_bps as u64),
-                percent = %pct,
-                "progress"
-            );
-        }
-    });
-
     // Subscribe to per-download events
     let mut event_stream = download.events();
     tokio::spawn(async move {
         while let Some(ev) = event_stream.next().await {
             // Event implements Display; we also log structured data above via tracing in the library.
             info!(event = %ev, "event");
+        }
+    });
+
+    let mut progress = download.progress();
+    tokio::spawn(async move {
+        while progress.changed().await.is_ok() {
+            let progress = *progress.borrow_and_update();
+            info!(
+                bytes = progress.bytes_downloaded(),
+                total = ?progress.total_bytes(),
+                bytes_per_second = progress.bytes_per_second(),
+                "progress"
+            );
         }
     });
 

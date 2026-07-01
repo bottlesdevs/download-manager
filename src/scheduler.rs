@@ -104,10 +104,7 @@ impl Scheduler {
             tokio::select! {
                 cmd = self.cmd_rx.recv() => match cmd {
                     Some(cmd) => self.handle_cmd(cmd).await,
-                    None => {
-                        info!("Scheduler command channel closed");
-                        break;
-                    }
+                    None => break,
                 },
                 Some(msg) = self.worker_rx.recv() => self.handle_worker_msg(msg).await,
                 expired = self.delayed.next(), if !self.delayed.is_empty() => {
@@ -119,18 +116,21 @@ impl Scheduler {
                         }
                     }
                 }
-                _ = self.shutdown_token.cancelled() => {
-                    info!("Scheduler shutdown requested");
-                    self.cmd_rx.close();
-                    break;
-                },
+                _ = self.shutdown_token.cancelled() => break,
             }
             self.try_dispatch();
         }
-        info!("Cancelling remaining jobs");
-        self.jobs
-            .drain()
-            .for_each(|(_, job)| job.cancel(self.ctx.events.clone()));
+
+        self.cmd_rx.close();
+        self.handle_cmd(SchedulerCmd::CancelAll).await;
+
+        // Drain active workers and preserve their real results.
+        while !self.jobs.is_empty() {
+            match self.worker_rx.recv().await {
+                Some(msg) => self.handle_worker_msg(msg).await,
+                None => break,
+            }
+        }
     }
 
     #[instrument(level = "debug", skip(self, msg))]

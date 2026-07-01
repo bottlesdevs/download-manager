@@ -1,18 +1,26 @@
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, atomic::Ordering},
+    num::NonZeroUsize,
+    panic::AssertUnwindSafe,
+    sync::Arc,
     time::Duration,
 };
 
-use futures_util::StreamExt;
-use tokio::sync::{mpsc, oneshot};
-use tokio_util::{sync::CancellationToken, task::TaskTracker, time::DelayQueue};
-use tracing::{debug, error, info, instrument, trace, warn};
+use futures_util::{FutureExt, StreamExt};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio::task::JoinSet;
+use tokio_util::{sync::CancellationToken, time::DelayQueue};
+use tracing::{debug, info, instrument, warn};
+use uuid::Uuid;
 
 use crate::{
-    DownloadError, DownloadID, DownloadResult, Event, Request,
     context::Context,
-    worker::{WorkerMsg, run},
+    download::DownloadResult,
+    error::{Error, Result, ResultExt},
+    events::{DownloadState, Event, EventKind, Progress},
+    request::Request,
+    storage,
+    worker::run,
 };
 
 pub struct ExponentialBackoff {
@@ -35,58 +43,59 @@ static BACKOFF_STRATEGY: ExponentialBackoff = ExponentialBackoff {
 
 pub(crate) enum SchedulerCmd {
     Enqueue {
-        request: Request,
-        result_tx: oneshot::Sender<Result<DownloadResult, DownloadError>>,
+        request: Arc<Request>,
+        progress_tx: watch::Sender<Progress>,
+        result_tx: oneshot::Sender<Result<DownloadResult>>,
+        cancel_token: CancellationToken,
     },
     Cancel {
-        id: DownloadID,
+        id: Uuid,
+    },
+    CancelAll,
+    SetMaxConcurrent {
+        max_concurrent: NonZeroUsize,
     },
 }
 
 pub(crate) struct Scheduler {
     ctx: Arc<Context>,
-    tracker: TaskTracker,
-    shutdown_token: CancellationToken,
+    max_concurrent: NonZeroUsize,
 
     cmd_rx: mpsc::Receiver<SchedulerCmd>,
-    worker_tx: mpsc::Sender<WorkerMsg>,
-    worker_rx: mpsc::Receiver<WorkerMsg>,
 
-    jobs: HashMap<DownloadID, Job>,
-    ready: VecDeque<DownloadID>,
-    delayed: DelayQueue<DownloadID>,
+    jobs: HashMap<Uuid, Job>,
+    ready: VecDeque<Uuid>,
+    delayed: DelayQueue<Uuid>,
+    workers: JoinSet<(Uuid, Result<DownloadResult>)>,
 }
 
 impl Scheduler {
-    #[instrument(level = "info", skip(ctx, tracker, cmd_rx, shutdown_token))]
+    #[instrument(level = "info", skip(ctx, cmd_rx))]
     pub fn new(
-        shutdown_token: CancellationToken,
+        max_concurrent: NonZeroUsize,
         ctx: Arc<Context>,
-        tracker: TaskTracker,
         cmd_rx: mpsc::Receiver<SchedulerCmd>,
     ) -> Self {
-        let (worker_tx, worker_rx) = mpsc::channel(1024);
         Self {
             ctx,
-            tracker,
-            shutdown_token,
+            max_concurrent,
             cmd_rx,
-            worker_tx,
-            worker_rx,
             ready: VecDeque::new(),
             delayed: DelayQueue::new(),
             jobs: HashMap::new(),
+            workers: JoinSet::new(),
         }
     }
 
     fn schedule(&mut self, job: Job) {
         let request = &job.request;
         let id = job.id();
-        request.emit(Event::Queued {
+        let _ = self.ctx.events.send(Event::new(
             id,
-            url: request.url().clone(),
-            destination: request.destination().to_path_buf(),
-        });
+            EventKind::Lifecycle {
+                state: DownloadState::Queued,
+            },
+        ));
         debug!(%id, url = %request.url(), destination = ?request.destination(), "Job queued");
         self.jobs.insert(id, job);
         self.ready.push_back(id);
@@ -96,138 +105,167 @@ impl Scheduler {
     pub async fn run(mut self) {
         loop {
             tokio::select! {
-                Some(cmd) = self.cmd_rx.recv() => self.handle_cmd(cmd).await,
-                Some(msg) = self.worker_rx.recv() =>self.handle_worker_msg(msg).await,
-                expired = self.delayed.next(), if !self.delayed.is_empty() => {
-                    if let Some(exp) = expired {
-                        self.ready.push_back(exp.into_inner());
+                cmd = self.cmd_rx.recv() => match cmd {
+                    Some(cmd) => self.handle_cmd(cmd).await,
+                    None => break,
+                },
+                Some(result) = self.workers.join_next() => {
+                    if let Some((id, result)) = result.log_warn() {
+                        self.handle_worker_result(id, result);
                     }
                 }
-                _ = self.shutdown_token.cancelled() => {
-                    info!("Scheduler shutdown requested");
-                    break;
-                },
+                Some(expired) = self.delayed.next() => {
+                    let id = expired.into_inner();
+                    if let Some(job) = self.jobs.get_mut(&id) {
+                        job.state = DownloadState::Queued;
+                        self.ready.push_back(id);
+                    }
+                }
+                _ = self.ctx.cancel_root.cancelled() => break,
             }
             self.try_dispatch();
         }
-        info!("Cancelling remaining jobs");
-        self.jobs.drain().for_each(|(_, job)| job.cancel());
+
+        self.cmd_rx.close();
+        self.handle_cmd(SchedulerCmd::CancelAll).await;
+
+        while let Some(result) = self.workers.join_next().await {
+            if let Some((id, result)) = result.log_warn() {
+                self.handle_worker_result(id, result);
+            }
+        }
     }
 
-    #[instrument(level = "debug", skip(self, msg))]
-    async fn handle_worker_msg(&mut self, msg: WorkerMsg) {
-        match msg {
-            WorkerMsg::Finish { id, result } => match result {
-                Ok(result) => {
-                    let Some(job) = self.jobs.remove(&id) else {
-                        return;
-                    };
-                    info!(%id, "Job completed successfully");
-                    job.finish(result)
+    fn handle_worker_result(&mut self, id: Uuid, result: Result<DownloadResult>) {
+        let Some(mut job) = self.jobs.remove(&id) else {
+            return;
+        };
+
+        match result {
+            Ok(result) => job.finish(self.ctx.events.clone(), result),
+            Err(Error::Cancelled) => job.cancel(self.ctx.events.clone()),
+            Err(error) if job.state != DownloadState::Cancelling && error.is_retryable() => {
+                if job.attempt >= job.request.config.retries() {
+                    warn!(%id, attempt = job.attempt, retries = job.request.config.retries(), error = %error, "Retry limit exceeded; failing job");
+                    job.fail(self.ctx.events.clone(), error);
+                    return;
                 }
-                Err(DownloadError::Cancelled) => {
-                    let Some(job) = self.jobs.remove(&id) else {
-                        return;
-                    };
-                    warn!(%id, "Job cancelled");
-                    job.cancel()
-                }
-                Err(error) if error.is_retryable() => {
-                    let Some(job) = self.jobs.get_mut(&id) else {
-                        return;
-                    };
-                    if job.attempt >= job.request.config().retries() {
-                        warn!(%id, attempt = job.attempt, retries = job.request.config().retries(), error = %error, "Retry limit exceeded; failing job");
-                        self.jobs.remove(&id).map(|job| job.fail(error));
-                        return;
-                    }
-                    let delay = BACKOFF_STRATEGY.next_delay(job.attempt);
-                    job.attempt += 1;
-                    warn!(%id, attempt = job.attempt, delay_ms = delay.as_millis(), error = %error, "Retryable error; scheduling retry");
-                    job.retry(delay);
-                    self.delayed.insert(id, delay);
-                }
-                Err(error) => {
-                    let Some(entry) = self.jobs.remove(&id) else {
-                        return;
-                    };
-                    error!(%id, error = %error, "Job failed with non-retryable error");
-                    entry.fail(error)
-                }
-            },
+                let delay = BACKOFF_STRATEGY.next_delay(job.attempt);
+                job.attempt += 1;
+                job.state = DownloadState::Retrying;
+                warn!(%id, attempt = job.attempt, delay_ms = delay.as_millis(), error = %error, "Retryable error; scheduling retry");
+                job.retry(self.ctx.events.clone(), delay);
+                self.jobs.insert(id, job);
+                self.delayed.insert(id, delay);
+            }
+            Err(error) => job.fail(self.ctx.events.clone(), error),
         }
     }
 
     #[instrument(level = "debug", skip(self, cmd))]
     async fn handle_cmd(&mut self, cmd: SchedulerCmd) {
         match cmd {
-            SchedulerCmd::Enqueue { request, result_tx } => {
+            SchedulerCmd::Enqueue {
+                request,
+                progress_tx,
+                result_tx,
+                cancel_token,
+            } => {
                 let id = request.id();
                 debug!(%id, url = %request.url(), destination = ?request.destination(), "Enqueue request");
                 self.schedule(Job {
-                    request: Arc::new(request),
+                    request,
+                    progress_tx,
                     result: Some(result_tx),
                     attempt: 0,
+                    cancel_token,
+                    state: DownloadState::Queued,
                 });
             }
             SchedulerCmd::Cancel { id } => {
                 info!(%id, "Received cancel command");
-                self.jobs.remove(&id).map(|job| job.cancel());
+                self.cancel_job(id).await;
             }
+            SchedulerCmd::CancelAll => {
+                self.ready.clear();
+                self.delayed.clear();
+
+                let ids: Vec<_> = self.jobs.keys().copied().collect();
+                for id in ids {
+                    self.cancel_job(id).await;
+                }
+            }
+            SchedulerCmd::SetMaxConcurrent { max_concurrent } => {
+                self.max_concurrent = max_concurrent;
+                info!(max_concurrent, "Updated download concurrency limit");
+            }
+        }
+    }
+
+    async fn cancel_job(&mut self, id: Uuid) {
+        let Some(job) = self.jobs.get_mut(&id) else {
+            return;
+        };
+
+        match job.state {
+            DownloadState::Queued | DownloadState::Retrying => {
+                let job = self.jobs.remove(&id).unwrap();
+                let cleanup = storage::discard_partial(job.request.destination()).await;
+                if let Err(error) = cleanup {
+                    job.fail(self.ctx.events.clone(), error);
+                } else {
+                    job.cancel(self.ctx.events.clone());
+                }
+            }
+            DownloadState::Running => {
+                job.state = DownloadState::Cancelling;
+                job.cancel_token.cancel();
+                let _ = self.ctx.events.send(Event::new(
+                    id,
+                    EventKind::Lifecycle {
+                        state: DownloadState::Cancelling,
+                    },
+                ));
+            }
+            DownloadState::Cancelling => {}
+            _ => {}
         }
     }
 
     #[instrument(level = "trace", skip(self))]
     fn try_dispatch(&mut self) {
-        struct ActiveGuard {
-            ctx: Arc<Context>,
-            _permit: tokio::sync::OwnedSemaphorePermit,
-        }
-
-        impl ActiveGuard {
-            fn new(ctx: Arc<Context>, permit: tokio::sync::OwnedSemaphorePermit) -> Self {
-                ctx.active.fetch_add(1, Ordering::Relaxed);
-                Self {
-                    ctx,
-                    _permit: permit,
-                }
-            }
-        }
-
-        impl Drop for ActiveGuard {
-            fn drop(&mut self) {
-                self.ctx.active.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
-
-        while let Some(id) = self.ready.pop_front() {
-            if self.shutdown_token.is_cancelled() {
+        while self.workers.len() < self.max_concurrent.get() {
+            let Some(id) = self.ready.pop_front() else {
+                break;
+            };
+            if self.ctx.cancel_root.is_cancelled() {
                 return;
             }
-            let permit = match self.ctx.semaphore.clone().try_acquire_owned() {
-                Ok(p) => p,
-                Err(_) => {
-                    // No permits left; put the job back to the front and stop dispatching for now.
-                    trace!(%id, "No semaphore permits available; requeuing to front");
-                    self.ready.push_front(id);
-                    return;
-                }
-            };
 
-            let Some(entry) = self.jobs.get_mut(&id) else {
-                drop(permit);
-                trace!(%id, "Job not found when dispatching");
+            let Some(job) = self.jobs.get_mut(&id) else {
                 continue;
             };
 
-            let request = entry.request.clone();
-            let ctx = self.ctx.clone();
-            let worker_tx = self.worker_tx.clone();
+            job.state = DownloadState::Running;
+            let _ = self.ctx.events.send(Event::new(
+                id,
+                EventKind::Lifecycle {
+                    state: DownloadState::Running,
+                },
+            ));
+
+            let request = job.request.clone();
+            let progress_tx = job.progress_tx.clone();
+            let cancel_token = job.cancel_token.clone();
+            let client = self.ctx.client.clone();
 
             info!(%id, "Dispatching job to worker");
-            self.tracker.spawn(async move {
-                let _guard = ActiveGuard::new(ctx.clone(), permit);
-                run(request, ctx, worker_tx).await;
+            self.workers.spawn(async move {
+                let result = AssertUnwindSafe(run(request, client, progress_tx, cancel_token))
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| Err(Error::Unknown("Download worker panicked".into())));
+                (id, result)
             });
         }
     }
@@ -235,49 +273,116 @@ impl Scheduler {
 
 pub(crate) struct Job {
     request: Arc<Request>,
+    progress_tx: watch::Sender<Progress>,
     attempt: u32,
-    result: Option<oneshot::Sender<Result<DownloadResult, DownloadError>>>,
+    result: Option<oneshot::Sender<Result<DownloadResult>>>,
+    cancel_token: CancellationToken,
+    state: DownloadState,
 }
 
 impl Job {
-    fn id(&self) -> DownloadID {
+    fn id(&self) -> Uuid {
         self.request.id()
     }
 
-    fn send_result(self, result: Result<DownloadResult, DownloadError>) {
+    fn send_result(self, result: Result<DownloadResult>) {
         if let Some(result_tx) = self.result {
             let _ = result_tx.send(result);
         }
     }
 
-    fn fail(self, error: DownloadError) {
-        self.request.emit(Event::Failed {
-            id: self.id(),
-            error: error.to_string(),
-        });
+    fn fail(self, event_tx: broadcast::Sender<Event>, error: Error) {
+        let _ = event_tx.send(Event::new(
+            self.id(),
+            EventKind::Lifecycle {
+                state: DownloadState::Failed {
+                    error: error.to_string(),
+                },
+            },
+        ));
         self.send_result(Err(error));
     }
 
-    fn finish(self, result: DownloadResult) {
-        self.request.emit(Event::Completed {
-            id: self.id(),
-            path: result.path.clone(),
-            bytes_downloaded: result.bytes_downloaded,
-        });
+    fn finish(self, event_tx: broadcast::Sender<Event>, result: DownloadResult) {
+        let _ = event_tx.send(Event::new(
+            self.id(),
+            EventKind::Lifecycle {
+                state: DownloadState::Completed,
+            },
+        ));
         self.send_result(Ok(result))
     }
 
-    fn retry(&self, delay: Duration) {
-        self.request.emit(Event::Retrying {
-            id: self.id(),
-            attempt: self.attempt,
-            next_delay_ms: delay.as_millis() as u64,
-        });
+    fn retry(&self, event_tx: broadcast::Sender<Event>, delay: Duration) {
+        let _ = event_tx.send(Event::new(
+            self.id(),
+            EventKind::RetryScheduled {
+                attempt: self.attempt,
+                next_delay_ms: delay.as_millis() as u64,
+            },
+        ));
     }
 
-    fn cancel(self) {
-        self.request.cancel_token.cancel();
-        self.request.emit(Event::Cancelled { id: self.id() });
-        self.send_result(Err(DownloadError::Cancelled))
+    fn cancel(self, event_tx: broadcast::Sender<Event>) {
+        self.cancel_token.cancel();
+        let _ = event_tx.send(Event::new(
+            self.id(),
+            EventKind::Lifecycle {
+                state: DownloadState::Cancelled,
+            },
+        ));
+        self.send_result(Err(Error::Cancelled))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exponential_backoff_grows_and_caps() {
+        let backoff = ExponentialBackoff {
+            base_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(8),
+        };
+
+        assert_eq!(backoff.next_delay(0), Duration::from_secs(1));
+        assert_eq!(backoff.next_delay(1), Duration::from_secs(2));
+        assert_eq!(backoff.next_delay(2), Duration::from_secs(4));
+        assert_eq!(backoff.next_delay(3), Duration::from_secs(8));
+        assert_eq!(backoff.next_delay(10), Duration::from_secs(8));
+    }
+
+    #[tokio::test]
+    async fn queued_job_can_be_cancelled_without_starting_a_worker() {
+        let (_cmd_tx, cmd_rx) = mpsc::channel(1);
+        let ctx = Context::new();
+        let mut scheduler = Scheduler::new(NonZeroUsize::new(1).unwrap(), ctx, cmd_rx);
+        let request = Arc::new(
+            Request::builder(
+                reqwest::Url::parse("https://example.com/file").unwrap(),
+                std::env::temp_dir().join(format!("dm-queued-test-{}", Uuid::new_v4())),
+            )
+            .build()
+            .unwrap(),
+        );
+        let id = request.id();
+        let cancel_token = CancellationToken::new();
+        let (progress_tx, _progress_rx) = watch::channel(Progress::new(0, None));
+        let (result_tx, result_rx) = oneshot::channel();
+
+        scheduler
+            .handle_cmd(SchedulerCmd::Enqueue {
+                request,
+                progress_tx,
+                result_tx,
+                cancel_token: cancel_token.clone(),
+            })
+            .await;
+        scheduler.handle_cmd(SchedulerCmd::Cancel { id }).await;
+
+        assert!(cancel_token.is_cancelled());
+        assert!(scheduler.jobs.is_empty());
+        assert!(matches!(result_rx.await.unwrap(), Err(Error::Cancelled)));
     }
 }

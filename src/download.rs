@@ -1,68 +1,75 @@
-use crate::{DownloadError, DownloadID, Event, Progress};
+use crate::{
+    error::{Error, Result, ResultExt},
+    events::{Event, Progress},
+    scheduler::SchedulerCmd,
+};
 use futures_core::Stream;
 use std::path::PathBuf;
-use tokio::sync::{broadcast, oneshot, watch};
-use tokio_stream::wrappers::{BroadcastStream, WatchStream};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio_stream::wrappers::BroadcastStream;
+use uuid::Uuid;
 
 /// Handle for a single download scheduled by DownloadManager.
 ///
 /// Behavior:
-/// - Implements Future; awaiting resolves to DownloadResult or DownloadError.
+/// - Implements Future; awaiting resolves to DownloadResult or Error.
 /// - Exposes per-download streams via [Download::progress()] and [Download::events()].
 /// - Cancellation is cooperative via [Download::cancel()]; the worker aborts the HTTP request and removes any partial file.
 pub struct Download {
-    id: DownloadID,
-    progress: watch::Receiver<Progress>,
+    id: Uuid,
     events: broadcast::Receiver<Event>,
-    result: oneshot::Receiver<Result<DownloadResult, DownloadError>>,
-
-    cancel_token: CancellationToken,
+    progress: watch::Receiver<Progress>,
+    result: oneshot::Receiver<Result<DownloadResult>>,
+    cmd_tx: mpsc::Sender<SchedulerCmd>,
 }
 
 impl Download {
     pub(crate) fn new(
-        id: DownloadID,
-        progress: watch::Receiver<Progress>,
+        id: Uuid,
         events: broadcast::Receiver<Event>,
-        result: oneshot::Receiver<Result<DownloadResult, DownloadError>>,
-        cancel_token: CancellationToken,
+        progress: watch::Receiver<Progress>,
+        result: oneshot::Receiver<Result<DownloadResult>>,
+        cmd_tx: mpsc::Sender<SchedulerCmd>,
     ) -> Self {
         Download {
             id,
-            progress,
             events,
+            progress,
             result,
-            cancel_token,
+            cmd_tx,
         }
     }
 
-    /// Unique identifier for this download, matching [DownloadEvent] IDs.
-    pub fn id(&self) -> DownloadID {
+    /// Unique identifier for this download, matching [`Event`] IDs.
+    pub fn id(&self) -> Uuid {
         self.id
     }
 
-    /// Request cooperative cancellation of this download.
-    ///
-    /// The scheduler/worker aborts the in-flight HTTP request and deletes any partially
-    /// written file. Cancellation is best-effort and may race with completion.
-    pub fn cancel(&self) {
-        self.cancel_token.cancel();
-    }
-
-    pub fn progress_raw(&self) -> watch::Receiver<Progress> {
+    /// Subscribe to the latest progress for this download.
+    pub fn progress(&self) -> watch::Receiver<Progress> {
         self.progress.clone()
     }
 
-    /// Stream of sampled Progress updates for this download.
+    /// Request cancellation and wait for it to take terminal effect.
     ///
-    /// Backed by a watch channel: consumers receive the latest state immediately,
-    /// and updates are coalesced according to sampling thresholds.
-    pub fn progress(&self) -> impl Stream<Item = Progress> + 'static {
-        WatchStream::new(self.progress_raw())
+    /// Resolves only once the download has reached a terminal state and any
+    /// partial file/manifest has been removed (cleanup succeeded). Returns:
+    /// - `Ok(())` when the download is terminally cancelled, was already
+    ///   finished, or completed before cancellation could win the race.
+    /// - `Err(..)` if cleanup failed or the manager was shut down.
+    pub async fn cancel(self) -> Result<()> {
+        self.cmd_tx
+            .send(SchedulerCmd::Cancel { id: self.id })
+            .await
+            .map_err(Error::from)?;
+        match self.result.await.map_err(|_| Error::ManagerShutdown)? {
+            Err(Error::Cancelled) => Ok(()),
+            Ok(_) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
-    /// Stream of [DownloadEvent] values scoped to this download only.
+    /// Stream of [`Event`] values scoped to this download only.
     ///
     /// Backed by a broadcast channel; lagged consumers may drop messages.
     /// This stream filters events to those whose id matches this handle.
@@ -71,25 +78,13 @@ impl Download {
 
         let download_id = self.id;
         BroadcastStream::new(self.events.resubscribe())
-            .filter_map(|res| res.ok())
-            .filter(move |event| {
-                let matches = match event {
-                    Event::Queued { id, .. }
-                    | Event::Probed { id, .. }
-                    | Event::Started { id, .. }
-                    | Event::Retrying { id, .. }
-                    | Event::Completed { id, .. }
-                    | Event::Failed { id, .. }
-                    | Event::Cancelled { id, .. } => *id == download_id,
-                };
-
-                matches
-            })
+            .filter_map(|result| result.log_warn())
+            .filter(move |event| event.id() == download_id)
     }
 }
 
 impl std::future::Future for Download {
-    type Output = Result<DownloadResult, DownloadError>;
+    type Output = Result<DownloadResult>;
 
     fn poll(
         mut self: std::pin::Pin<&mut Self>,
@@ -100,7 +95,7 @@ impl std::future::Future for Download {
 
         match Pin::new(&mut self.result).poll(cx) {
             Poll::Ready(Ok(result)) => Poll::Ready(result),
-            Poll::Ready(Err(_)) => Poll::Ready(Err(DownloadError::ManagerShutdown)),
+            Poll::Ready(Err(_)) => Poll::Ready(Err(Error::ManagerShutdown)),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -112,13 +107,51 @@ pub struct DownloadResult {
     pub bytes_downloaded: u64,
 }
 
-#[derive(Debug, Clone)]
-/// Remote metadata obtained via a best-effort `HEAD` probe prior to downloading.
-/// Availability depends on server support; fields are None when not provided.
-pub struct RemoteInfo {
-    pub content_length: Option<u64>,
-    pub accept_ranges: Option<String>,
-    pub etag: Option<String>,
-    pub last_modified: Option<String>,
-    pub content_type: Option<String>,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn download(
+        result: oneshot::Receiver<Result<DownloadResult>>,
+        cmd_tx: mpsc::Sender<SchedulerCmd>,
+    ) -> Download {
+        let (_event_tx, event_rx) = broadcast::channel(1);
+        let (_progress_tx, progress_rx) = watch::channel(Progress::new(0, None));
+        Download::new(Uuid::new_v4(), event_rx, progress_rx, result, cmd_tx)
+    }
+
+    #[test]
+    fn progress_returns_latest_value() {
+        let (_event_tx, event_rx) = broadcast::channel(1);
+        let (progress_tx, progress_rx) = watch::channel(Progress::new(0, None));
+        let (_result_tx, result_rx) = oneshot::channel();
+        let (cmd_tx, _cmd_rx) = mpsc::channel(1);
+        let download = Download::new(Uuid::new_v4(), event_rx, progress_rx, result_rx, cmd_tx);
+        let progress_rx = download.progress();
+        let mut progress = Progress::new(0, Some(100));
+        progress.add(40);
+
+        progress_tx.send_replace(progress);
+
+        assert_eq!(progress_rx.borrow().bytes_downloaded(), 40);
+        assert_eq!(progress_rx.borrow().total_bytes(), Some(100));
+    }
+
+    #[tokio::test]
+    async fn cancel_waits_for_terminal_cancellation_result() {
+        let (result_tx, result_rx) = oneshot::channel();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
+        let download = download(result_rx, cmd_tx);
+        let id = download.id();
+        let responder = tokio::spawn(async move {
+            let Some(SchedulerCmd::Cancel { id: cancelled_id }) = cmd_rx.recv().await else {
+                panic!("expected cancel command");
+            };
+            assert_eq!(cancelled_id, id);
+            let _ = result_tx.send(Err(Error::Cancelled));
+        });
+
+        assert!(download.cancel().await.is_ok());
+        responder.await.unwrap();
+    }
 }

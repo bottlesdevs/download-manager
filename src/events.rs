@@ -97,7 +97,7 @@ impl std::fmt::Display for EventKind {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct ProgressTracker {
+pub(crate) struct ProgressTracker {
     bytes: u64,
     total: Option<u64>,
 
@@ -187,7 +187,7 @@ impl ProgressTracker {
             .map(|total| (self.bytes as f64 / total as f64) * 100.0)
     }
 
-    pub(crate) fn force_update(&mut self) {
+    pub fn force_update(&mut self) {
         let now = Instant::now();
         let dt = now.duration_since(self.last_sample_at);
         let byte_delta = self.bytes - self.last_sample_bytes;

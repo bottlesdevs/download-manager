@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use download_manager::DownloadManager;
+use download_manager::prelude::*;
 use futures_util::StreamExt;
 use reqwest::Url;
 // use std::fmt::Debug;
@@ -25,7 +25,7 @@ fn init_tracing() {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     init_tracing();
 
     let manager = DownloadManager::default();

@@ -1,4 +1,8 @@
-use crate::{Error, Event, Result, error::ResultExt, scheduler::SchedulerCmd};
+use crate::{
+    error::{Error, Result, ResultExt},
+    events::Event,
+    scheduler::SchedulerCmd,
+};
 use futures_core::Stream;
 use std::path::PathBuf;
 use tokio::sync::{broadcast, mpsc, oneshot};

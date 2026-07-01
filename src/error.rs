@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 use tracing::instrument;
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 #[allow(dead_code)]
 pub(crate) trait ResultExt<T, E> {

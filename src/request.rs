@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use tracing::instrument;
 use uuid::Uuid;
 
-use crate::{Error, Result};
+use crate::error::{Error, Result};
 
 /// Immutable description of a single download request.
 ///
@@ -28,7 +28,7 @@ pub struct Request {
     #[builder(field(ty = "PathBuf"))]
     destination: PathBuf,
     #[builder(field(ty = "DownloadConfigBuilder"))]
-    config: DownloadConfig,
+    pub(crate) config: DownloadConfig,
 }
 
 /// Per-request configuration for retries, overwrite behavior, and headers.
@@ -39,7 +39,7 @@ pub struct Request {
 /// - `headers`: extra HTTP headers (e.g., User-Agent).
 #[derive(Debug, Builder, Clone)]
 #[builder(pattern = "owned")]
-pub struct DownloadConfig {
+pub(crate) struct DownloadConfig {
     #[builder(default = "3")]
     retries: u32,
     #[builder(default = "false")]
@@ -111,10 +111,6 @@ impl Request {
     pub fn destination(&self) -> &Path {
         self.destination.as_path()
     }
-
-    pub fn config(&self) -> &DownloadConfig {
-        &self.config
-    }
 }
 
 impl RequestBuilder {
@@ -185,10 +181,10 @@ mod tests {
 
         assert_eq!(request.url(), &url());
         assert_eq!(request.destination(), Path::new("out.bin"));
-        assert_eq!(request.config().retries(), 5);
-        assert!(request.config().overwrite());
+        assert_eq!(request.config.retries(), 5);
+        assert!(request.config.overwrite());
         assert_eq!(
-            request.config().headers().get(reqwest::header::USER_AGENT),
+            request.config.headers().get(reqwest::header::USER_AGENT),
             Some(&HeaderValue::from_static("download-manager-test"))
         );
         assert_ne!(request.id(), second.id());
@@ -198,9 +194,9 @@ mod tests {
     fn builder_uses_documented_defaults() {
         let request = Request::builder(url(), "out.bin").build().unwrap();
 
-        assert_eq!(request.config().retries(), 3);
-        assert!(!request.config().overwrite());
-        assert!(request.config().headers().is_empty());
+        assert_eq!(request.config.retries(), 3);
+        assert!(!request.config.overwrite());
+        assert!(request.config.headers().is_empty());
     }
 
     #[test]

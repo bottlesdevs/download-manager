@@ -1,8 +1,9 @@
 use crate::{
-    Download, Event, Request, Result,
     context::Context,
-    error::ResultExt,
-    request::RequestBuilder,
+    download::Download,
+    error::{Result, ResultExt},
+    events::Event,
+    request::{Request, RequestBuilder},
     scheduler::{Scheduler, SchedulerCmd},
 };
 use derive_builder::Builder;
@@ -12,8 +13,7 @@ use std::{path::Path, sync::Arc};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
-use tracing::{debug, info, instrument, warn};
-use uuid::Uuid;
+use tracing::{info, instrument, warn};
 
 /// Entry point for scheduling, observing, and cancelling downloads.
 ///
@@ -112,24 +112,6 @@ impl DownloadManager {
     /// Use this if you need non-default behavior or want to hook into progress/event callbacks before start().
     pub fn download_builder(&self, url: Url, destination: impl AsRef<Path>) -> RequestBuilder {
         Request::builder(url, destination)
-    }
-
-    /// Best-effort attempt to request cancellation for a download by ID.
-    ///
-    /// - No-op if the job is already finished or missing.
-    /// - Returns an error if the internal command channel is unavailable or the buffer is full.
-    #[instrument(level = "info", skip(self), fields(?id = id))]
-    pub fn try_cancel(&self, id: Uuid) -> Result<()> {
-        match self.scheduler_tx.try_send(SchedulerCmd::Cancel { id }) {
-            Ok(_) => {
-                debug!(%id, "Cancel command enqueued (try_cancel)");
-                Ok(())
-            }
-            Err(e) => {
-                warn!(%id, error = %e, "Failed to send cancel command with try_send");
-                Err(e.into())
-            }
-        }
     }
 
     /// Cancel all queued and in-flight downloads managed by this instance.

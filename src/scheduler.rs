@@ -110,7 +110,9 @@ impl Scheduler {
                 },
                 Some(msg) = self.worker_rx.recv() => self.handle_worker_msg(msg).await,
                 Some(result) = self.workers.join_next() => {
-                    result.log_warn().map(|(id, result)| self.handle_worker_result(id, result.map_err(Error::from)));
+                    if let Some((id, result)) = result.log_warn() {
+                        self.handle_worker_result(id, result);
+                    }
                 }
                 Some(expired) = self.delayed.next() => {
                     let id = expired.into_inner();
@@ -131,7 +133,9 @@ impl Scheduler {
             tokio::select! {
                 Some(msg) = self.worker_rx.recv() => self.handle_worker_msg(msg).await,
                 Some(result) = self.workers.join_next() => {
-                    result.log_warn().map(|(id, result)| self.handle_worker_result(id, result.map_err(Error::from)));
+                    if let Some((id, result)) = result.log_warn() {
+                        self.handle_worker_result(id, result);
+                    }
                 }
             }
         }
@@ -356,5 +360,55 @@ impl Job {
             },
         ));
         self.send_result(Err(Error::Cancelled))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exponential_backoff_grows_and_caps() {
+        let backoff = ExponentialBackoff {
+            base_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(8),
+        };
+
+        assert_eq!(backoff.next_delay(0), Duration::from_secs(1));
+        assert_eq!(backoff.next_delay(1), Duration::from_secs(2));
+        assert_eq!(backoff.next_delay(2), Duration::from_secs(4));
+        assert_eq!(backoff.next_delay(3), Duration::from_secs(8));
+        assert_eq!(backoff.next_delay(10), Duration::from_secs(8));
+    }
+
+    #[tokio::test]
+    async fn queued_job_can_be_cancelled_without_starting_a_worker() {
+        let (_cmd_tx, cmd_rx) = mpsc::channel(1);
+        let ctx = Context::new();
+        let mut scheduler = Scheduler::new(1, ctx, cmd_rx);
+        let request = Arc::new(
+            Request::builder(
+                reqwest::Url::parse("https://example.com/file").unwrap(),
+                std::env::temp_dir().join(format!("dm-queued-test-{}", Uuid::new_v4())),
+            )
+            .build()
+            .unwrap(),
+        );
+        let id = request.id();
+        let cancel_token = CancellationToken::new();
+        let (result_tx, result_rx) = oneshot::channel();
+
+        scheduler
+            .handle_cmd(SchedulerCmd::Enqueue {
+                request,
+                result_tx,
+                cancel_token: cancel_token.clone(),
+            })
+            .await;
+        scheduler.handle_cmd(SchedulerCmd::Cancel { id }).await;
+
+        assert!(cancel_token.is_cancelled());
+        assert!(scheduler.jobs.is_empty());
+        assert!(matches!(result_rx.await.unwrap(), Err(Error::Cancelled)));
     }
 }

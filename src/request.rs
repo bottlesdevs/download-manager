@@ -163,3 +163,50 @@ impl RequestBuilder {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn url() -> Url {
+        Url::parse("https://example.com/file.bin").unwrap()
+    }
+
+    #[test]
+    fn builder_preserves_configuration_and_assigns_unique_ids() {
+        let request = Request::builder(url(), "out.bin")
+            .retries(5)
+            .overwrite(true)
+            .user_agent("download-manager-test")
+            .unwrap()
+            .build()
+            .unwrap();
+        let second = Request::builder(url(), "out.bin").build().unwrap();
+
+        assert_eq!(request.url(), &url());
+        assert_eq!(request.destination(), Path::new("out.bin"));
+        assert_eq!(request.config().retries(), 5);
+        assert!(request.config().overwrite());
+        assert_eq!(
+            request.config().headers().get(reqwest::header::USER_AGENT),
+            Some(&HeaderValue::from_static("download-manager-test"))
+        );
+        assert_ne!(request.id(), second.id());
+    }
+
+    #[test]
+    fn builder_uses_documented_defaults() {
+        let request = Request::builder(url(), "out.bin").build().unwrap();
+
+        assert_eq!(request.config().retries(), 3);
+        assert!(!request.config().overwrite());
+        assert!(request.config().headers().is_empty());
+    }
+
+    #[test]
+    fn invalid_header_value_is_reported() {
+        let result = Request::builder(url(), "out.bin").header("x-test", "line one\nline two");
+
+        assert!(matches!(result, Err(Error::InvalidHeaderValue { .. })));
+    }
+}

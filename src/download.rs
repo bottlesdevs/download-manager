@@ -105,3 +105,34 @@ pub struct RemoteInfo {
     pub last_modified: Option<String>,
     pub content_type: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn download(
+        result: oneshot::Receiver<Result<DownloadResult>>,
+        cmd_tx: mpsc::Sender<SchedulerCmd>,
+    ) -> Download {
+        let (_event_tx, event_rx) = broadcast::channel(1);
+        Download::new(Uuid::new_v4(), event_rx, result, cmd_tx)
+    }
+
+    #[tokio::test]
+    async fn cancel_waits_for_terminal_cancellation_result() {
+        let (result_tx, result_rx) = oneshot::channel();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
+        let download = download(result_rx, cmd_tx);
+        let id = download.id();
+        let responder = tokio::spawn(async move {
+            let Some(SchedulerCmd::Cancel { id: cancelled_id }) = cmd_rx.recv().await else {
+                panic!("expected cancel command");
+            };
+            assert_eq!(cancelled_id, id);
+            let _ = result_tx.send(Err(Error::Cancelled));
+        });
+
+        assert!(download.cancel().await.is_ok());
+        responder.await.unwrap();
+    }
+}

@@ -9,7 +9,7 @@ use crate::{
 use derive_builder::Builder;
 use futures_core::Stream;
 use reqwest::Url;
-use std::{path::Path, sync::Arc};
+use std::{num::NonZeroUsize, path::Path, sync::Arc};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
@@ -127,6 +127,17 @@ impl DownloadManager {
             .log_warn();
     }
 
+    /// Change the maximum number of downloads that may run concurrently.
+    ///
+    /// Lowering the limit does not cancel active downloads. The scheduler waits
+    /// for enough of them to finish before dispatching more queued work.
+    pub async fn set_max_concurrent(&self, max_concurrent: NonZeroUsize) -> Result<()> {
+        self.scheduler_tx
+            .send(SchedulerCmd::SetMaxConcurrent { max_concurrent })
+            .await?;
+        Ok(())
+    }
+
     /// A fallible-safe stream of global [DownloadEvent] values.
     ///
     /// Internally wraps the broadcast receiver and filters out lagged/closed errors.
@@ -151,14 +162,16 @@ impl DownloadManager {
 
 #[derive(Builder)]
 pub struct DownloadManagerConfig {
-    #[builder(default = 3, setter(custom))]
-    pub(crate) max_concurrent: usize,
+    #[builder(default = "NonZeroUsize::new(3).unwrap()")]
+    pub(crate) max_concurrent: NonZeroUsize,
 }
 
 impl Default for DownloadManagerConfig {
     #[instrument(level = "debug")]
     fn default() -> Self {
-        Self { max_concurrent: 3 }
+        Self {
+            max_concurrent: NonZeroUsize::new(3).unwrap(),
+        }
     }
 }
 
@@ -180,5 +193,17 @@ mod tests {
         })
         .await
         .expect("scheduler should release its context after manager drop");
+    }
+
+    #[tokio::test]
+    async fn concurrency_limit_can_be_changed_at_runtime() {
+        let manager = DownloadManager::default();
+
+        manager
+            .set_max_concurrent(NonZeroUsize::new(5).unwrap())
+            .await
+            .unwrap();
+
+        manager.shutdown().await;
     }
 }

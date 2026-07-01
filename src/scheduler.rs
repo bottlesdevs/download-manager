@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    num::NonZeroUsize,
     panic::AssertUnwindSafe,
     sync::Arc,
     time::Duration,
@@ -50,11 +51,14 @@ pub(crate) enum SchedulerCmd {
         id: Uuid,
     },
     CancelAll,
+    SetMaxConcurrent {
+        max_concurrent: NonZeroUsize,
+    },
 }
 
 pub(crate) struct Scheduler {
     ctx: Arc<Context>,
-    max_concurrent: usize,
+    max_concurrent: NonZeroUsize,
 
     cmd_rx: mpsc::Receiver<SchedulerCmd>,
     worker_tx: mpsc::Sender<WorkerMsg>,
@@ -69,7 +73,7 @@ pub(crate) struct Scheduler {
 impl Scheduler {
     #[instrument(level = "info", skip(ctx, cmd_rx))]
     pub fn new(
-        max_concurrent: usize,
+        max_concurrent: NonZeroUsize,
         ctx: Arc<Context>,
         cmd_rx: mpsc::Receiver<SchedulerCmd>,
     ) -> Self {
@@ -229,6 +233,10 @@ impl Scheduler {
                     self.cancel_job(id).await;
                 }
             }
+            SchedulerCmd::SetMaxConcurrent { max_concurrent } => {
+                self.max_concurrent = max_concurrent;
+                info!(max_concurrent, "Updated download concurrency limit");
+            }
         }
     }
 
@@ -264,7 +272,7 @@ impl Scheduler {
 
     #[instrument(level = "trace", skip(self))]
     fn try_dispatch(&mut self) {
-        while self.workers.len() < self.max_concurrent {
+        while self.workers.len() < self.max_concurrent.get() {
             let Some(id) = self.ready.pop_front() else {
                 break;
             };
@@ -386,7 +394,7 @@ mod tests {
     async fn queued_job_can_be_cancelled_without_starting_a_worker() {
         let (_cmd_tx, cmd_rx) = mpsc::channel(1);
         let ctx = Context::new();
-        let mut scheduler = Scheduler::new(1, ctx, cmd_rx);
+        let mut scheduler = Scheduler::new(NonZeroUsize::new(1).unwrap(), ctx, cmd_rx);
         let request = Arc::new(
             Request::builder(
                 reqwest::Url::parse("https://example.com/file").unwrap(),

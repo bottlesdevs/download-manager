@@ -11,7 +11,6 @@ use std::{path::Path, sync::Arc};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
@@ -29,12 +28,11 @@ pub struct DownloadManager {
     scheduler_tx: mpsc::Sender<SchedulerCmd>,
     ctx: Arc<Context>,
     scheduler: JoinHandle<()>,
-    shutdown_token: CancellationToken,
 }
 
 impl Drop for DownloadManager {
     fn drop(&mut self) {
-        self.shutdown_token.cancel();
+        self.ctx.cancel_root.cancel();
     }
 }
 
@@ -53,21 +51,14 @@ impl DownloadManager {
     #[instrument(level = "info", skip(config))]
     pub fn with_config(config: DownloadManagerConfig) -> DownloadManager {
         let (cmd_tx, cmd_rx) = mpsc::channel(1024);
-        let shutdown_token = CancellationToken::new();
-        let ctx = Context::new(shutdown_token.child_token());
-        let scheduler = Scheduler::new(
-            config.max_concurrent,
-            shutdown_token.clone(),
-            ctx.clone(),
-            cmd_rx,
-        );
+        let ctx = Context::new();
+        let scheduler = Scheduler::new(config.max_concurrent, ctx.clone(), cmd_rx);
         let scheduler = tokio::spawn(scheduler.run());
 
         let manager = DownloadManager {
             scheduler_tx: cmd_tx,
             ctx: ctx.clone(),
             scheduler,
-            shutdown_token,
         };
 
         info!(
@@ -165,7 +156,7 @@ impl DownloadManager {
     #[instrument(level = "info", skip(self))]
     pub async fn shutdown(mut self) {
         info!("Shutting down DownloadManager");
-        self.shutdown_token.cancel();
+        self.ctx.cancel_root.cancel();
         if let Err(error) = (&mut self.scheduler).await {
             warn!(%error, "Download manager scheduler failed");
         }

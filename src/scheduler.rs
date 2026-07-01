@@ -52,7 +52,6 @@ pub(crate) enum SchedulerCmd {
 pub(crate) struct Scheduler {
     ctx: Arc<Context>,
     max_concurrent: usize,
-    shutdown_token: CancellationToken,
 
     cmd_rx: mpsc::Receiver<SchedulerCmd>,
     worker_tx: mpsc::Sender<WorkerMsg>,
@@ -65,10 +64,9 @@ pub(crate) struct Scheduler {
 }
 
 impl Scheduler {
-    #[instrument(level = "info", skip(ctx, cmd_rx, shutdown_token))]
+    #[instrument(level = "info", skip(ctx, cmd_rx))]
     pub fn new(
         max_concurrent: usize,
-        shutdown_token: CancellationToken,
         ctx: Arc<Context>,
         cmd_rx: mpsc::Receiver<SchedulerCmd>,
     ) -> Self {
@@ -76,7 +74,6 @@ impl Scheduler {
         Self {
             ctx,
             max_concurrent,
-            shutdown_token,
             cmd_rx,
             worker_tx,
             worker_rx,
@@ -117,7 +114,7 @@ impl Scheduler {
                         self.ready.push_back(id);
                     }
                 }
-                _ = self.shutdown_token.cancelled() => break,
+                _ = self.ctx.cancel_root.cancelled() => break,
             }
             self.try_dispatch();
         }
@@ -259,7 +256,7 @@ impl Scheduler {
             let Some(id) = self.ready.pop_front() else {
                 break;
             };
-            if self.shutdown_token.is_cancelled() {
+            if self.ctx.cancel_root.is_cancelled() {
                 return;
             }
 

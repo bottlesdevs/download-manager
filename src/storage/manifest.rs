@@ -5,7 +5,7 @@ use tokio::fs;
 use tracing::warn;
 
 use super::manifest_path;
-use crate::error::{Error, Result};
+use crate::{Error, Result};
 
 /// A half-open byte range `[start, end)` written to the `.part` file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

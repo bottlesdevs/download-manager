@@ -7,7 +7,7 @@ pub(crate) use manifest::Manifest;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
-use crate::error::Result;
+use crate::Result;
 
 /// Bytes actually present in the `.part` file (0 if it is absent).
 pub(crate) async fn part_len(dest: &Path) -> u64 {

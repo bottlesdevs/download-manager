@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use tracing::instrument;
 use uuid::Uuid;
 
-use crate::{Error, error::Result};
+use crate::{Error, Result};
 
 /// Immutable description of a single download request.
 ///

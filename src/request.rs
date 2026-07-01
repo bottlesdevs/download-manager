@@ -14,11 +14,14 @@ use crate::{Error, error::Result};
 /// Built by [RequestBuilder] and executed by the scheduler. Holds destination,
 /// headers and retry policy. Most users should prefer creating
 /// requests via [DownloadManager::download_builder()].
-#[derive(Clone, Builder)]
+///
+/// `Request` must not implement [`Clone`]: its ID is the scheduler's job key,
+/// so enqueuing a clone could replace another job with the same ID. Build a
+/// fresh request for each download instead.
+#[derive(Builder)]
 #[builder(pattern = "owned")]
 #[builder(build_fn(skip))]
 pub struct Request {
-    #[builder(field(ty = "Uuid"))]
     id: Uuid,
     #[builder(setter(custom))]
     url: Url,
@@ -90,7 +93,7 @@ impl DownloadConfig {
 impl Request {
     pub fn builder(url: Url, destination: impl AsRef<Path>) -> RequestBuilder {
         RequestBuilder {
-            id: Uuid::new_v4(),
+            id: None,
             url: Some(url),
             destination: destination.as_ref().to_path_buf(),
             config: DownloadConfigBuilder::default(),
@@ -142,7 +145,7 @@ impl RequestBuilder {
 
     #[instrument(level = "info", skip(self))]
     pub fn build(self) -> Result<Request> {
-        let id = self.id;
+        let id = Uuid::new_v4();
         let url = self
             .url
             .ok_or_else(|| Error::InvalidRequest("URL must be set".to_string()))?;

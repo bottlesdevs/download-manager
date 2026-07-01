@@ -7,8 +7,8 @@ use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::{
+    Error, Result,
     download::RemoteInfo,
-    error::Error,
     events::ProgressTracker,
     prelude::DownloadResult,
     request::Request,
@@ -29,7 +29,7 @@ pub(crate) enum WorkerMsg {
     },
     Finish {
         id: Uuid,
-        result: Result<DownloadResult, Error>,
+        result: Result<DownloadResult>,
     },
 }
 
@@ -39,7 +39,7 @@ pub(crate) async fn run(
     client: Client,
     worker_tx: mpsc::Sender<WorkerMsg>,
     cancel_token: CancellationToken,
-) -> Result<DownloadResult, Error> {
+) -> Result<DownloadResult> {
     let dest = request.destination();
 
     // `overwrite` guards the *final* path; partial data lives in `<dest>.part`.
@@ -145,7 +145,7 @@ async fn send_get(
     offset: u64,
     prior: Option<&Manifest>,
     cancel_token: &CancellationToken,
-) -> Result<Response, Error> {
+) -> Result<Response> {
     let mut builder = client
         .request(Method::GET, request.url().as_ref())
         .headers(request.config().headers().clone());

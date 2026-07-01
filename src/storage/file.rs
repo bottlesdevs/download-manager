@@ -6,7 +6,7 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tracing::trace;
 
 use super::{Manifest, discard_partial, manifest_path, part_path};
-use crate::error::Result;
+use crate::Result;
 
 /// The `<dest>.part` file plus its durable manifest. Writes always target the
 /// `.part`; the final destination only appears via an atomic rename on success.

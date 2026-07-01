@@ -202,7 +202,7 @@ impl Scheduler {
                 let id = request.id();
                 debug!(%id, url = %request.url(), destination = ?request.destination(), "Enqueue request");
                 self.schedule(Job {
-                    request: request,
+                    request,
                     result: Some(result_tx),
                     attempt: 0,
                     cancel_token,

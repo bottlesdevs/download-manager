@@ -7,7 +7,8 @@ use std::{
 
 use futures_util::{FutureExt, StreamExt};
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio_util::{sync::CancellationToken, task::TaskTracker, time::DelayQueue};
+use tokio::task::JoinSet;
+use tokio_util::{sync::CancellationToken, time::DelayQueue};
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
@@ -60,7 +61,7 @@ pub(crate) struct Scheduler {
     jobs: HashMap<Uuid, Job>,
     ready: VecDeque<Uuid>,
     delayed: DelayQueue<Uuid>,
-    workers: TaskTracker,
+    workers: JoinSet<(Uuid, Result<DownloadResult>)>,
 }
 
 impl Scheduler {
@@ -80,7 +81,7 @@ impl Scheduler {
             ready: VecDeque::new(),
             delayed: DelayQueue::new(),
             jobs: HashMap::new(),
-            workers: TaskTracker::new(),
+            workers: JoinSet::new(),
         }
     }
 
@@ -107,6 +108,9 @@ impl Scheduler {
                     None => break,
                 },
                 Some(msg) = self.worker_rx.recv() => self.handle_worker_msg(msg).await,
+                Some(result) = self.workers.join_next() => {
+                    self.handle_worker_join(result.map_err(Error::from));
+                }
                 Some(expired) = self.delayed.next() => {
                     let id = expired.into_inner();
                     if let Some(job) = self.jobs.get_mut(&id) {
@@ -122,9 +126,12 @@ impl Scheduler {
         self.cmd_rx.close();
         self.handle_cmd(SchedulerCmd::CancelAll).await;
 
-        while !self.jobs.is_empty() {
-            if let Some(msg) = self.worker_rx.recv().await {
-                self.handle_worker_msg(msg).await;
+        while !self.workers.is_empty() {
+            tokio::select! {
+                Some(msg) = self.worker_rx.recv() => self.handle_worker_msg(msg).await,
+                Some(result) = self.workers.join_next() => {
+                    self.handle_worker_join(result.map_err(Error::from));
+                }
             }
         }
     }
@@ -156,7 +163,13 @@ impl Scheduler {
                     ));
                 }
             }
-            WorkerMsg::Finish { id, result } => self.handle_worker_result(id, result),
+        }
+    }
+
+    fn handle_worker_join(&mut self, result: Result<(Uuid, Result<DownloadResult>)>) {
+        match result {
+            Ok((id, result)) => self.handle_worker_result(id, result),
+            Err(error) => warn!(%error, "Worker task failed to join"),
         }
     }
 
@@ -276,17 +289,14 @@ impl Scheduler {
             let cancel_token = job.cancel_token.clone();
             let client = self.ctx.client.clone();
             let worker_tx = self.worker_tx.clone();
-            let token = self.workers.token();
 
             info!(%id, "Dispatching job to worker");
-            tokio::spawn(async move {
-                let result =
-                    AssertUnwindSafe(run(request, client, worker_tx.clone(), cancel_token))
-                        .catch_unwind()
-                        .await
-                        .unwrap_or_else(|_| Err(Error::Unknown("Download worker panicked".into())));
-                drop(token);
-                let _ = worker_tx.send(WorkerMsg::Finish { id, result }).await;
+            self.workers.spawn(async move {
+                let result = AssertUnwindSafe(run(request, client, worker_tx, cancel_token))
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| Err(Error::Unknown("Download worker panicked".into())));
+                (id, result)
             });
         }
     }

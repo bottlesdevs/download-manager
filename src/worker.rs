@@ -27,10 +27,6 @@ pub(crate) enum WorkerMsg {
         rate_bps: f64,
         eta: Option<Duration>,
     },
-    Finish {
-        id: Uuid,
-        result: Result<DownloadResult>,
-    },
 }
 
 #[instrument(level = "info", skip(request, client, cancel_token, worker_tx), fields(id = %request.id(), url = %request.url(), destination = ?request.destination()))]

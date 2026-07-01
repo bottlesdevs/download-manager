@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::{
     Error, Result,
     download::RemoteInfo,
+    error::ResultExt,
     events::ProgressTracker,
     prelude::DownloadResult,
     request::Request,
@@ -39,7 +40,7 @@ pub(crate) async fn run(
     let dest = request.destination();
 
     // `overwrite` guards the *final* path; partial data lives in `<dest>.part`.
-    if tokio::fs::try_exists(dest).await.unwrap_or(false) && !request.config().overwrite() {
+    if tokio::fs::try_exists(dest).await? && !request.config().overwrite() {
         warn!(?dest, "Destination exists and overwrite=false; failing");
         return Err(Error::FileExists {
             path: dest.to_path_buf(),
@@ -52,7 +53,7 @@ pub(crate) async fn run(
         .await
         .filter(|m| m.resume_offset() > 0 && m.validator().is_some());
     let offset = match &prior {
-        Some(m) => m.resume_offset().min(storage::part_len(dest).await),
+        Some(m) => m.resume_offset().min(storage::part_len(dest).await?),
         None => 0,
     };
 
@@ -76,7 +77,8 @@ pub(crate) async fn run(
             id: request.id(),
             info: info.clone(),
         })
-        .await;
+        .await
+        .log_debug();
 
     let mut manifest = Manifest {
         url: request.url().to_string(),
@@ -108,7 +110,7 @@ pub(crate) async fn run(
                     Ok(None) => break,
                     Err(e) => {
                         // Keep `.part` + manifest so a retry / next run can resume.
-                        let _ = part.checkpoint().await;
+                        let _ = part.checkpoint().await.log_warn();
                         error!(error = %e, ?dest, "Transfer error; keeping partial for resume");
                         return Err(e.into());
                     }
@@ -169,7 +171,7 @@ fn remote_info(response: &Response, total: Option<u64>) -> RemoteInfo {
     let get = |name: header::HeaderName| {
         headers
             .get(name)
-            .and_then(|v| v.to_str().ok())
+            .and_then(|value| value.to_str().log_debug())
             .map(str::to_string)
     };
     RemoteInfo {
@@ -195,5 +197,6 @@ async fn send_progress(
             rate_bps: progress.rate_bps(),
             eta: progress.eta(),
         })
-        .await;
+        .await
+        .log_debug();
 }

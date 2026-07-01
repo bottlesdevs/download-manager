@@ -1,4 +1,3 @@
-use crate::download::RemoteInfo;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -55,20 +54,8 @@ impl std::fmt::Display for DownloadState {
 
 #[derive(Debug, Clone)]
 pub enum EventKind {
-    Lifecycle {
-        state: DownloadState,
-    },
-    Metadata {
-        info: RemoteInfo,
-    },
-    Progress {
-        bytes_downloaded: u64,
-        total_bytes: Option<u64>,
-    },
-    RetryScheduled {
-        attempt: u32,
-        next_delay_ms: u64,
-    },
+    Lifecycle { state: DownloadState },
+    RetryScheduled { attempt: u32, next_delay_ms: u64 },
 }
 
 impl std::fmt::Display for Event {
@@ -81,11 +68,6 @@ impl std::fmt::Display for EventKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EventKind::Lifecycle { state } => write!(f, "Lifecycle: {}", state),
-            EventKind::Metadata { info } => write!(f, "Metadata: {:?}", info),
-            EventKind::Progress {
-                bytes_downloaded,
-                total_bytes,
-            } => write!(f, "Progress: {:?}:{:?}", bytes_downloaded, total_bytes),
             EventKind::RetryScheduled {
                 attempt,
                 next_delay_ms,
@@ -96,8 +78,9 @@ impl std::fmt::Display for EventKind {
     }
 }
 
+/// Latest observed transfer progress for one download.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ProgressTracker {
+pub struct Progress {
     bytes: u64,
     total: Option<u64>,
 
@@ -109,14 +92,14 @@ pub(crate) struct ProgressTracker {
     ema_bps: f64,           // exponential moving average
 }
 
-impl ProgressTracker {
+impl Progress {
     const EMA_ALPHA: f64 = 0.2;
     const MIN_SAMPLE_BYTES: u64 = 64 * 1024; // 64 KiB
     const MIN_SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 
     pub(crate) fn new(starting_bytes: u64, total: Option<u64>) -> Self {
         let now = Instant::now();
-        ProgressTracker {
+        Progress {
             bytes: starting_bytes,
             total,
             instantaneous_bps: 0.0,
@@ -127,7 +110,7 @@ impl ProgressTracker {
         }
     }
 
-    pub fn add(&mut self, n: u64) -> bool {
+    pub(crate) fn add(&mut self, n: u64) -> bool {
         self.bytes += n;
         let now = Instant::now();
         let dt = now.duration_since(self.last_sample_at);
@@ -155,22 +138,27 @@ impl ProgressTracker {
         }
     }
 
-    pub fn bytes(&self) -> u64 {
+    /// Number of bytes downloaded, including a resumed prefix.
+    pub fn bytes_downloaded(&self) -> u64 {
         self.bytes
     }
 
-    pub fn total(&self) -> Option<u64> {
+    /// Expected total size, when provided by the server.
+    pub fn total_bytes(&self) -> Option<u64> {
         self.total
     }
 
-    pub fn rate_bps(&self) -> f64 {
+    /// Smoothed transfer rate in bytes per second.
+    pub fn bytes_per_second(&self) -> f64 {
         self.ema_bps
     }
 
+    /// Time elapsed since the current transfer attempt started.
     pub fn elapsed(&self) -> Duration {
         self.started_at.elapsed()
     }
 
+    /// Estimated time remaining, when size and rate are known.
     pub fn eta(&self) -> Option<Duration> {
         let total = self.total?;
         let remaining = total.saturating_sub(self.bytes);
@@ -181,13 +169,14 @@ impl ProgressTracker {
         }
     }
 
+    /// Completion percentage, when the total size is known and non-zero.
     pub fn percent(&self) -> Option<f64> {
         self.total
             .filter(|&total| total > 0)
             .map(|total| (self.bytes as f64 / total as f64) * 100.0)
     }
 
-    pub fn force_update(&mut self) {
+    pub(crate) fn force_update(&mut self) {
         let now = Instant::now();
         let dt = now.duration_since(self.last_sample_at);
         let byte_delta = self.bytes - self.last_sample_bytes;
@@ -204,25 +193,25 @@ mod tests {
 
     #[test]
     fn samples_after_byte_threshold() {
-        let mut tracker = ProgressTracker::new(0, None);
+        let mut progress = Progress::new(0, None);
 
-        assert!(!tracker.add(1024));
-        assert!(tracker.add(ProgressTracker::MIN_SAMPLE_BYTES - 1024));
-        assert_eq!(tracker.bytes(), ProgressTracker::MIN_SAMPLE_BYTES);
-        assert_eq!(tracker.total(), None);
-        assert_eq!(tracker.percent(), None);
-        assert_eq!(tracker.eta(), None);
+        assert!(!progress.add(1024));
+        assert!(progress.add(Progress::MIN_SAMPLE_BYTES - 1024));
+        assert_eq!(progress.bytes_downloaded(), Progress::MIN_SAMPLE_BYTES);
+        assert_eq!(progress.total_bytes(), None);
+        assert_eq!(progress.percent(), None);
+        assert_eq!(progress.eta(), None);
     }
 
     #[test]
     fn resumed_progress_updates_rate_percent_and_eta() {
-        let mut tracker = ProgressTracker::new(25, Some(100));
-        tracker.last_sample_at = Instant::now() - Duration::from_secs(1);
+        let mut progress = Progress::new(25, Some(100));
+        progress.last_sample_at = Instant::now() - Duration::from_secs(1);
 
-        assert!(tracker.add(25));
-        assert_eq!(tracker.bytes(), 50);
-        assert_eq!(tracker.percent(), Some(50.0));
-        assert!(tracker.rate_bps() > 0.0);
-        assert!(tracker.eta().is_some());
+        assert!(progress.add(25));
+        assert_eq!(progress.bytes_downloaded(), 50);
+        assert_eq!(progress.percent(), Some(50.0));
+        assert!(progress.bytes_per_second() > 0.0);
+        assert!(progress.eta().is_some());
     }
 }

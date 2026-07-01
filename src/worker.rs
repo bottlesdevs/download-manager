@@ -1,39 +1,23 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use reqwest::{Client, Method, Response, StatusCode, header};
-use tokio::sync::mpsc;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
-use uuid::Uuid;
 
 use crate::{
-    download::RemoteInfo,
     error::{Error, Result, ResultExt},
-    events::ProgressTracker,
+    events::Progress,
     prelude::DownloadResult,
     request::Request,
     storage::{self, Manifest, PartFile},
 };
 
-pub(crate) enum WorkerMsg {
-    Metadata {
-        id: Uuid,
-        info: RemoteInfo,
-    },
-    Progress {
-        id: Uuid,
-        bytes_downloaded: u64,
-        total_bytes: Option<u64>,
-        rate_bps: f64,
-        eta: Option<Duration>,
-    },
-}
-
-#[instrument(level = "info", skip(request, client, cancel_token, worker_tx), fields(id = %request.id(), url = %request.url(), destination = ?request.destination()))]
+#[instrument(level = "info", skip(request, client, progress_tx, cancel_token), fields(id = %request.id(), url = %request.url(), destination = ?request.destination()))]
 pub(crate) async fn run(
     request: Arc<Request>,
     client: Client,
-    worker_tx: mpsc::Sender<WorkerMsg>,
+    progress_tx: watch::Sender<Progress>,
     cancel_token: CancellationToken,
 ) -> Result<DownloadResult> {
     let dest = request.destination();
@@ -70,25 +54,17 @@ pub(crate) async fn run(
     let start = if resumed { offset } else { 0 };
     let total = response.content_length().map(|remaining| start + remaining);
 
-    let info = remote_info(&response, total);
-    let _ = worker_tx
-        .send(WorkerMsg::Metadata {
-            id: request.id(),
-            info: info.clone(),
-        })
-        .await
-        .log_debug();
-
     let mut manifest = Manifest {
         url: request.url().to_string(),
-        etag: info.etag,
-        last_modified: info.last_modified,
+        etag: response_header(&response, header::ETAG),
+        last_modified: response_header(&response, header::LAST_MODIFIED),
         total_length: total,
         completed_ranges: Vec::new(),
     };
     manifest.set_contiguous(start);
     let mut part = PartFile::open(dest, start, manifest).await?;
-    let mut progress = ProgressTracker::new(start, total);
+    let mut progress = Progress::new(start, total);
+    progress_tx.send_replace(progress);
     debug!(start, ?total, resumed, "Transfer started");
 
     loop {
@@ -103,7 +79,7 @@ pub(crate) async fn run(
                     Ok(Some(chunk)) => {
                         part.write(&chunk).await?;
                         if progress.add(chunk.len() as u64) {
-                            send_progress(&worker_tx, request.id(), &progress, total).await;
+                            progress_tx.send_replace(progress);
                         }
                     }
                     Ok(None) => break,
@@ -119,17 +95,17 @@ pub(crate) async fn run(
     }
 
     progress.force_update();
-    send_progress(&worker_tx, request.id(), &progress, total).await;
+    progress_tx.send_replace(progress);
     let path = part.finalize().await?;
     info!(
         ?path,
-        bytes = progress.bytes(),
+        bytes = progress.bytes_downloaded(),
         "Download completed successfully"
     );
 
     Ok(DownloadResult {
         path,
-        bytes_downloaded: progress.bytes(),
+        bytes_downloaded: progress.bytes_downloaded(),
     })
 }
 
@@ -165,37 +141,10 @@ async fn send_get(
     }
 }
 
-fn remote_info(response: &Response, total: Option<u64>) -> RemoteInfo {
-    let headers = response.headers();
-    let get = |name: header::HeaderName| {
-        headers
-            .get(name)
-            .and_then(|value| value.to_str().log_debug())
-            .map(str::to_string)
-    };
-    RemoteInfo {
-        content_length: total,
-        accept_ranges: get(header::ACCEPT_RANGES),
-        etag: get(header::ETAG),
-        last_modified: get(header::LAST_MODIFIED),
-        content_type: get(header::CONTENT_TYPE),
-    }
-}
-
-async fn send_progress(
-    tx: &mpsc::Sender<WorkerMsg>,
-    id: Uuid,
-    progress: &ProgressTracker,
-    total: Option<u64>,
-) {
-    let _ = tx
-        .send(WorkerMsg::Progress {
-            id,
-            bytes_downloaded: progress.bytes(),
-            total_bytes: total,
-            rate_bps: progress.rate_bps(),
-            eta: progress.eta(),
-        })
-        .await
-        .log_debug();
+fn response_header(response: &Response, name: header::HeaderName) -> Option<String> {
+    response
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().log_debug())
+        .map(str::to_string)
 }

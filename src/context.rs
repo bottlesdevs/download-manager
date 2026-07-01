@@ -22,10 +22,10 @@ impl Context {
     /// Create a new shared Context.
     /// - Creates a root [CancellationToken] and a broadcast channel (capacity 1024).
     /// - Constructs a shared [reqwest::Client].
-    pub fn new(cancel_root: CancellationToken) -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         let (tx, _rx) = broadcast::channel(1024);
         Arc::new(Self {
-            cancel_root,
+            cancel_root: CancellationToken::new(),
             client: Client::new(),
             events: tx,
         })

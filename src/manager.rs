@@ -2,7 +2,7 @@ use crate::{
     context::Context,
     download::Download,
     error::{Result, ResultExt},
-    events::Event,
+    events::{Event, Progress},
     request::{Request, RequestBuilder},
     scheduler::{Scheduler, SchedulerCmd},
 };
@@ -10,7 +10,7 @@ use derive_builder::Builder;
 use futures_core::Stream;
 use reqwest::Url;
 use std::{num::NonZeroUsize, path::Path, sync::Arc};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use tracing::{info, instrument, warn};
@@ -72,9 +72,10 @@ impl DownloadManager {
 
     /// Start a download with default request settings.
     ///
-    /// - Returns a [Download] handle which is also a Future yielding [DownloadResult] or Error.
-    /// - You can stream progress and per-download events from the returned handle.
-    /// - Cancellation: call [Download::cancel()] on the handle, or [DownloadManager::cancel(id)].
+    /// - Returns a [`Download`] handle which is also a future yielding
+    ///   [`DownloadResult`](crate::download::DownloadResult) or an error.
+    /// - You can observe progress and per-download events from the returned handle.
+    /// - Cancellation: call [`Download::cancel()`] on the handle.
     #[instrument(level = "info", skip(self, destination), fields(url = %url))]
     pub fn download(&self, url: Url, destination: impl AsRef<Path>) -> Result<Download> {
         let request = self.download_builder(url, destination).build()?;
@@ -83,18 +84,21 @@ impl DownloadManager {
 
     /// Enqueue a download request.
     ///
-    /// - Returns a [Download] handle which is also a Future yielding [DownloadResult] or Error.
-    /// - You can stream progress and per-download events from the returned handle.
-    /// - Cancellation: call [Download::cancel()] on the handle, or [DownloadManager::cancel(id)].
+    /// - Returns a [`Download`] handle which is also a future yielding
+    ///   [`DownloadResult`](crate::download::DownloadResult) or an error.
+    /// - You can observe progress and per-download events from the returned handle.
+    /// - Cancellation: call [`Download::cancel()`] on the handle.
     #[instrument(level = "info", skip(self, request))]
     pub fn enqueue(&self, request: Request) -> Result<Download> {
         let id = request.id();
         let event_rx = self.ctx.events.subscribe();
+        let (progress_tx, progress_rx) = watch::channel(Progress::new(0, None));
         let (result_tx, result_rx) = oneshot::channel();
         let cancel_token = self.ctx.child_token();
 
         self.scheduler_tx.try_send(SchedulerCmd::Enqueue {
             request: Arc::new(request),
+            progress_tx,
             result_tx,
             cancel_token: cancel_token.clone(),
         })?;
@@ -102,6 +106,7 @@ impl DownloadManager {
         Ok(Download::new(
             id,
             event_rx,
+            progress_rx,
             result_rx,
             self.scheduler_tx.clone(),
         ))
@@ -138,7 +143,7 @@ impl DownloadManager {
         Ok(())
     }
 
-    /// A fallible-safe stream of global [DownloadEvent] values.
+    /// A stream of global [`Event`] values.
     ///
     /// Internally wraps the broadcast receiver and filters out lagged/closed errors.
     #[instrument(level = "debug", skip(self))]

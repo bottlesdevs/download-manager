@@ -7,7 +7,7 @@ use std::{
 };
 
 use futures_util::{FutureExt, StreamExt};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 use tokio_util::{sync::CancellationToken, time::DelayQueue};
 use tracing::{debug, info, instrument, warn};
@@ -17,10 +17,10 @@ use crate::{
     context::Context,
     download::DownloadResult,
     error::{Error, Result, ResultExt},
-    events::{DownloadState, Event, EventKind},
+    events::{DownloadState, Event, EventKind, Progress},
     request::Request,
     storage,
-    worker::{WorkerMsg, run},
+    worker::run,
 };
 
 pub struct ExponentialBackoff {
@@ -44,6 +44,7 @@ static BACKOFF_STRATEGY: ExponentialBackoff = ExponentialBackoff {
 pub(crate) enum SchedulerCmd {
     Enqueue {
         request: Arc<Request>,
+        progress_tx: watch::Sender<Progress>,
         result_tx: oneshot::Sender<Result<DownloadResult>>,
         cancel_token: CancellationToken,
     },
@@ -61,8 +62,6 @@ pub(crate) struct Scheduler {
     max_concurrent: NonZeroUsize,
 
     cmd_rx: mpsc::Receiver<SchedulerCmd>,
-    worker_tx: mpsc::Sender<WorkerMsg>,
-    worker_rx: mpsc::Receiver<WorkerMsg>,
 
     jobs: HashMap<Uuid, Job>,
     ready: VecDeque<Uuid>,
@@ -77,13 +76,10 @@ impl Scheduler {
         ctx: Arc<Context>,
         cmd_rx: mpsc::Receiver<SchedulerCmd>,
     ) -> Self {
-        let (worker_tx, worker_rx) = mpsc::channel(1024);
         Self {
             ctx,
             max_concurrent,
             cmd_rx,
-            worker_tx,
-            worker_rx,
             ready: VecDeque::new(),
             delayed: DelayQueue::new(),
             jobs: HashMap::new(),
@@ -113,7 +109,6 @@ impl Scheduler {
                     Some(cmd) => self.handle_cmd(cmd).await,
                     None => break,
                 },
-                Some(msg) = self.worker_rx.recv() => self.handle_worker_msg(msg).await,
                 Some(result) = self.workers.join_next() => {
                     if let Some((id, result)) = result.log_warn() {
                         self.handle_worker_result(id, result);
@@ -134,44 +129,9 @@ impl Scheduler {
         self.cmd_rx.close();
         self.handle_cmd(SchedulerCmd::CancelAll).await;
 
-        while !self.workers.is_empty() {
-            tokio::select! {
-                Some(msg) = self.worker_rx.recv() => self.handle_worker_msg(msg).await,
-                Some(result) = self.workers.join_next() => {
-                    if let Some((id, result)) = result.log_warn() {
-                        self.handle_worker_result(id, result);
-                    }
-                }
-            }
-        }
-    }
-
-    #[instrument(level = "debug", skip(self, msg))]
-    async fn handle_worker_msg(&mut self, msg: WorkerMsg) {
-        match msg {
-            WorkerMsg::Metadata { id, info } => {
-                if self.jobs.contains_key(&id) {
-                    let _ = self
-                        .ctx
-                        .events
-                        .send(Event::new(id, EventKind::Metadata { info }));
-                }
-            }
-            WorkerMsg::Progress {
-                id,
-                bytes_downloaded,
-                total_bytes,
-                ..
-            } => {
-                if self.jobs.contains_key(&id) {
-                    let _ = self.ctx.events.send(Event::new(
-                        id,
-                        EventKind::Progress {
-                            bytes_downloaded,
-                            total_bytes,
-                        },
-                    ));
-                }
+        while let Some(result) = self.workers.join_next().await {
+            if let Some((id, result)) = result.log_warn() {
+                self.handle_worker_result(id, result);
             }
         }
     }
@@ -207,6 +167,7 @@ impl Scheduler {
         match cmd {
             SchedulerCmd::Enqueue {
                 request,
+                progress_tx,
                 result_tx,
                 cancel_token,
             } => {
@@ -214,6 +175,7 @@ impl Scheduler {
                 debug!(%id, url = %request.url(), destination = ?request.destination(), "Enqueue request");
                 self.schedule(Job {
                     request,
+                    progress_tx,
                     result: Some(result_tx),
                     attempt: 0,
                     cancel_token,
@@ -293,13 +255,13 @@ impl Scheduler {
             ));
 
             let request = job.request.clone();
+            let progress_tx = job.progress_tx.clone();
             let cancel_token = job.cancel_token.clone();
             let client = self.ctx.client.clone();
-            let worker_tx = self.worker_tx.clone();
 
             info!(%id, "Dispatching job to worker");
             self.workers.spawn(async move {
-                let result = AssertUnwindSafe(run(request, client, worker_tx, cancel_token))
+                let result = AssertUnwindSafe(run(request, client, progress_tx, cancel_token))
                     .catch_unwind()
                     .await
                     .unwrap_or_else(|_| Err(Error::Unknown("Download worker panicked".into())));
@@ -311,6 +273,7 @@ impl Scheduler {
 
 pub(crate) struct Job {
     request: Arc<Request>,
+    progress_tx: watch::Sender<Progress>,
     attempt: u32,
     result: Option<oneshot::Sender<Result<DownloadResult>>>,
     cancel_token: CancellationToken,
@@ -405,11 +368,13 @@ mod tests {
         );
         let id = request.id();
         let cancel_token = CancellationToken::new();
+        let (progress_tx, _progress_rx) = watch::channel(Progress::new(0, None));
         let (result_tx, result_rx) = oneshot::channel();
 
         scheduler
             .handle_cmd(SchedulerCmd::Enqueue {
                 request,
+                progress_tx,
                 result_tx,
                 cancel_token: cancel_token.clone(),
             })

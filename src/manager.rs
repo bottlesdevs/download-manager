@@ -7,14 +7,12 @@ use crate::{
 use derive_builder::Builder;
 use futures_core::Stream;
 use reqwest::Url;
-use std::{
-    path::Path,
-    sync::{Arc, atomic::Ordering},
-};
+use std::{path::Path, sync::Arc};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use tracing::{debug, info, instrument, trace, warn};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 /// Entry point for scheduling, observing, and cancelling downloads.
@@ -30,7 +28,7 @@ use uuid::Uuid;
 pub struct DownloadManager {
     scheduler_tx: mpsc::Sender<SchedulerCmd>,
     ctx: Arc<Context>,
-    tracker: TaskTracker,
+    scheduler: JoinHandle<()>,
     shutdown_token: CancellationToken,
 }
 
@@ -55,20 +53,23 @@ impl DownloadManager {
     #[instrument(level = "info", skip(config))]
     pub fn with_config(config: DownloadManagerConfig) -> DownloadManager {
         let (cmd_tx, cmd_rx) = mpsc::channel(1024);
-        let tracker = TaskTracker::new();
         let shutdown_token = CancellationToken::new();
-        let ctx = Context::new(&config, shutdown_token.child_token());
-        let scheduler =
-            Scheduler::new(shutdown_token.clone(), ctx.clone(), tracker.clone(), cmd_rx);
+        let ctx = Context::new(shutdown_token.child_token());
+        let scheduler = Scheduler::new(
+            config.max_concurrent,
+            shutdown_token.clone(),
+            ctx.clone(),
+            cmd_rx,
+        );
+        let scheduler = tokio::spawn(scheduler.run());
 
         let manager = DownloadManager {
             scheduler_tx: cmd_tx,
             ctx: ctx.clone(),
-            tracker: tracker.clone(),
+            scheduler,
             shutdown_token,
         };
 
-        tracker.spawn(async move { scheduler.run().await });
         info!(
             max_concurrent = config.max_concurrent,
             "DownloadManager initialized and scheduler started"
@@ -139,34 +140,6 @@ impl DownloadManager {
         }
     }
 
-    /// Request cancellation for a download by ID.
-    ///
-    /// - No-op if the job is already finished or missing.
-    /// - Returns an error only if the internal command channel is unavailable.
-    #[instrument(level = "info", skip(self), fields(?id = id))]
-    pub async fn cancel(&self, id: Uuid) -> Result<()> {
-        match self.scheduler_tx.send(SchedulerCmd::Cancel { id }).await {
-            Ok(_) => {
-                info!(%id, "Cancel command sent");
-                Ok(())
-            }
-            Err(e) => {
-                warn!(%id, error = %e, "Failed to send cancel command");
-                Err(e.into())
-            }
-        }
-    }
-
-    /// Number of currently active (running) downloads.
-    ///
-    /// Does not include queued or delayed retries. Reflects active semaphore permits.
-    #[instrument(level = "trace", skip(self))]
-    pub fn active_downloads(&self) -> usize {
-        let n = self.ctx.active.load(Ordering::Relaxed);
-        trace!(active = n, "Active downloads");
-        n
-    }
-
     /// Cancel all queued and in-flight downloads managed by this instance.
     ///
     /// This triggers cooperative cancellation for workers and removes partial files.
@@ -190,11 +163,12 @@ impl DownloadManager {
     /// - Prevents new tasks from being scheduled and waits for all worker tasks to finish.
     /// Call this before dropping the manager if you need deterministic teardown.
     #[instrument(level = "info", skip(self))]
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(mut self) {
         info!("Shutting down DownloadManager");
         self.shutdown_token.cancel();
-        self.tracker.close();
-        self.tracker.wait().await;
+        if let Err(error) = (&mut self.scheduler).await {
+            warn!(%error, "Download manager scheduler failed");
+        }
         info!("DownloadManager shutdown complete");
     }
 }

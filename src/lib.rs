@@ -11,7 +11,7 @@ mod worker;
 pub mod prelude {
     pub use super::download::{Download, DownloadResult};
     pub use super::error::Error;
-    pub use super::events::Event;
+    pub use super::events::{Event, Progress};
     pub use super::manager::DownloadManager;
     pub use super::request::{Request, RequestBuilder};
 }

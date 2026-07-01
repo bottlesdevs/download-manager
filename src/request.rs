@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 ///
 /// Built by [RequestBuilder] and executed by the scheduler. Holds destination,
 /// headers and retry policy. Most users should prefer creating
-/// requests via [DownloadManager::download_builder()].
+/// requests via [`DownloadManager::download_builder`](crate::manager::DownloadManager::download_builder).
 ///
 /// `Request` must not implement [`Clone`]: its ID is the scheduler's job key,
 /// so enqueuing a clone could replace another job with the same ID. Build a

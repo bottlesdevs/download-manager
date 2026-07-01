@@ -45,6 +45,19 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    let mut progress = download.progress();
+    tokio::spawn(async move {
+        while progress.changed().await.is_ok() {
+            let progress = *progress.borrow_and_update();
+            info!(
+                bytes = progress.bytes_downloaded(),
+                total = ?progress.total_bytes(),
+                bytes_per_second = progress.bytes_per_second(),
+                "progress"
+            );
+        }
+    });
+
     // Optionally, you can also subscribe to global events across all downloads:
     // let mut global_events = manager.events();
     // tokio::spawn(async move {

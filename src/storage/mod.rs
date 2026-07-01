@@ -18,15 +18,16 @@ pub(crate) async fn part_len(dest: &Path) -> u64 {
 }
 
 /// Terminal cleanup for a cancelled download: remove the `.part` and its
-/// manifest sidecar. Errors removing the `.part` propagate (so callers can
-/// report cleanup failure); a missing manifest is fine.
+/// manifest sidecar. Removal errors propagate so callers can report cleanup
+/// failure; missing sidecars are fine.
 pub(crate) async fn discard_partial(dest: &Path) -> Result<()> {
-    match fs::remove_file(part_path(dest)).await {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
+    for path in [part_path(dest), manifest_path(dest)] {
+        match fs::remove_file(path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
     }
-    let _ = fs::remove_file(manifest_path(dest)).await;
     Ok(())
 }
 
@@ -82,6 +83,21 @@ mod tests {
             // Finalize cleans up the sidecars.
             assert!(Manifest::load(&dest).await.is_none());
             assert_eq!(part_len(&dest).await, 0);
+
+            let _ = fs::remove_dir_all(&dir).await;
+        });
+    }
+
+    #[test]
+    fn discard_partial_reports_removal_failure() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut dir = std::env::temp_dir();
+            dir.push(format!("dm-discard-test-{}", uuid::Uuid::new_v4()));
+            let dest = dir.join("file.bin");
+
+            fs::create_dir_all(part_path(&dest)).await.unwrap();
+            assert!(discard_partial(&dest).await.is_err());
 
             let _ = fs::remove_dir_all(&dir).await;
         });

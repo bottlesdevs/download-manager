@@ -5,7 +5,7 @@ use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tracing::trace;
 
-use super::{Manifest, manifest_path, part_path};
+use super::{Manifest, discard_partial, manifest_path, part_path};
 use crate::error::Result;
 
 /// The `<dest>.part` file plus its durable manifest. Writes always target the
@@ -93,13 +93,6 @@ impl PartFile {
     pub async fn discard(self) -> Result<()> {
         let PartFile { dest, file, .. } = self;
         drop(file);
-        Self::remove(&dest).await;
-        let _ = fs::remove_file(manifest_path(&dest)).await;
-        Ok(())
-    }
-
-    /// Best-effort removal of the `.part` file for `dest`.
-    pub async fn remove(dest: &Path) {
-        let _ = fs::remove_file(part_path(dest)).await;
+        discard_partial(&dest).await
     }
 }

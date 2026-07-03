@@ -9,7 +9,10 @@ use std::{
 use futures_util::{FutureExt, StreamExt};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
-use tokio_util::{sync::CancellationToken, time::DelayQueue};
+use tokio_util::{
+    sync::CancellationToken,
+    time::{DelayQueue, delay_queue::Key},
+};
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
@@ -47,6 +50,14 @@ pub(crate) enum SchedulerCmd {
         request: Arc<Request>,
         progress_tx: watch::Sender<Progress>,
         result_tx: oneshot::Sender<Result<DownloadResult>>,
+    },
+    Pause {
+        id: Uuid,
+        ack: oneshot::Sender<Result<()>>,
+    },
+    Resume {
+        id: Uuid,
+        ack: oneshot::Sender<Result<()>>,
     },
     Cancel {
         id: Uuid,
@@ -116,7 +127,8 @@ impl Scheduler {
                 }
                 Some(expired) = self.delayed.next() => {
                     let id = expired.into_inner();
-                    if let Some(job) = self.jobs.get_mut(&id) {
+                    if let Some(job) = self.jobs.get_mut(&id).filter(|job| job.state == DownloadState::Retrying) {
+                        job.retry_key = None;
                         job.state = DownloadState::Queued;
                         self.ready.push_back(id);
                     }
@@ -160,8 +172,8 @@ impl Scheduler {
                 job.state = DownloadState::Retrying;
                 warn!(%id, attempt = job.attempt, delay_ms = delay.as_millis(), error = %error, "Retryable error; scheduling retry");
                 job.retry(self.ctx.events.clone(), delay);
+                job.retry_key = Some(self.delayed.insert(id, delay));
                 self.jobs.insert(id, job);
-                self.delayed.insert(id, delay);
             }
             Err(error) => job.fail(self.ctx.events.clone(), error),
         }
@@ -183,10 +195,13 @@ impl Scheduler {
                     progress_tx,
                     result: Some(result_tx),
                     attempt: 0,
+                    retry_key: None,
                     cancel_token: self.ctx.cancel_root.child_token(),
                     state: DownloadState::Queued,
                 });
             }
+            SchedulerCmd::Pause { id, ack } => self.pause_job(id, ack),
+            SchedulerCmd::Resume { id, ack } => self.resume_job(id, ack),
             SchedulerCmd::Cancel { id } => {
                 info!(%id, "Received cancel command");
                 self.cancel_job(id).await;
@@ -207,13 +222,82 @@ impl Scheduler {
         }
     }
 
+    fn pause_job(&mut self, id: Uuid, ack: oneshot::Sender<Result<()>>) {
+        let Some(job) = self.jobs.get_mut(&id) else {
+            let _ = ack.send(Err(Error::Unknown(format!("unknown download {id}"))));
+            return;
+        };
+        match job.state {
+            DownloadState::Queued => {
+                self.ready.retain(|queued| *queued != id);
+                job.state = DownloadState::Paused;
+                let _ = self.ctx.events.send(Event::new(
+                    id,
+                    EventKind::Lifecycle {
+                        state: DownloadState::Paused,
+                    },
+                ));
+                let _ = ack.send(Ok(()));
+            }
+            DownloadState::Retrying => {
+                if let Some(key) = job.retry_key.take() {
+                    self.delayed.remove(&key);
+                }
+                job.state = DownloadState::Paused;
+                let _ = self.ctx.events.send(Event::new(
+                    id,
+                    EventKind::Lifecycle {
+                        state: DownloadState::Paused,
+                    },
+                ));
+                let _ = ack.send(Ok(()));
+            }
+            DownloadState::Paused => {
+                let _ = ack.send(Ok(()));
+            }
+            _ => {
+                let _ = ack.send(Err(Error::InvalidRequest(
+                    "download cannot be paused in its current state".into(),
+                )));
+            }
+        }
+    }
+
+    fn resume_job(&mut self, id: Uuid, ack: oneshot::Sender<Result<()>>) {
+        let Some(job) = self.jobs.get_mut(&id) else {
+            let _ = ack.send(Err(Error::Unknown(format!("unknown download {id}"))));
+            return;
+        };
+        match job.state {
+            DownloadState::Paused => {
+                job.state = DownloadState::Queued;
+                self.ready.push_back(id);
+                let _ = self.ctx.events.send(Event::new(
+                    id,
+                    EventKind::Lifecycle {
+                        state: DownloadState::Queued,
+                    },
+                ));
+                let _ = ack.send(Ok(()));
+            }
+            DownloadState::Queued | DownloadState::Running | DownloadState::Retrying => {
+                let _ = ack.send(Ok(()));
+            }
+            _ => {
+                let _ = ack.send(Err(Error::InvalidRequest(
+                    "download cannot be resumed in its current state".into(),
+                )));
+            }
+        }
+    }
+
     async fn cancel_job(&mut self, id: Uuid) {
         let Some(job) = self.jobs.get_mut(&id) else {
             return;
         };
 
         match job.state {
-            DownloadState::Queued | DownloadState::Retrying => {
+            DownloadState::Queued | DownloadState::Retrying | DownloadState::Paused => {
                 let job = self.jobs.remove(&id).unwrap();
                 let cleanup = storage::discard_partial(job.request.destination()).await;
                 if let Err(error) = cleanup {
@@ -282,6 +366,7 @@ pub(crate) struct Job {
     request: Arc<Request>,
     progress_tx: watch::Sender<Progress>,
     attempt: u32,
+    retry_key: Option<Key>,
     result: Option<oneshot::Sender<Result<DownloadResult>>>,
     cancel_token: CancellationToken,
     state: DownloadState,
@@ -388,5 +473,45 @@ mod tests {
 
         assert!(scheduler.jobs.is_empty());
         assert!(matches!(result_rx.await.unwrap(), Err(Error::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn pausing_retrying_job_removes_retry_timer() {
+        let (_cmd_tx, cmd_rx) = mpsc::channel(1);
+        let ctx = Context::new();
+        let mut scheduler = Scheduler::new(NonZeroUsize::new(1).unwrap(), ctx, cmd_rx);
+        let request = Arc::new(
+            Request::builder(
+                reqwest::Url::parse("https://example.com/file").unwrap(),
+                std::env::temp_dir().join(format!("dm-pause-test-{}", Uuid::new_v4())),
+            )
+            .build()
+            .unwrap(),
+        );
+        let id = Uuid::new_v4();
+        let (progress_tx, _progress_rx) = watch::channel(Progress::new(0, None));
+        let (result_tx, _result_rx) = oneshot::channel();
+
+        scheduler
+            .handle_cmd(SchedulerCmd::Enqueue {
+                id,
+                request,
+                progress_tx,
+                result_tx,
+            })
+            .await;
+        let retry_timer = scheduler.delayed.insert(id, Duration::from_secs(60));
+        let job = scheduler.jobs.get_mut(&id).unwrap();
+        job.state = DownloadState::Retrying;
+        job.retry_key = Some(retry_timer);
+
+        let (ack, result) = oneshot::channel();
+        scheduler.pause_job(id, ack);
+
+        assert!(result.await.unwrap().is_ok());
+        assert!(scheduler.delayed.is_empty());
+        let job = scheduler.jobs.get(&id).unwrap();
+        assert_eq!(job.state, DownloadState::Paused);
+        assert!(job.retry_key.is_none());
     }
 }

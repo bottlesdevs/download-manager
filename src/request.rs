@@ -50,7 +50,7 @@ impl DownloadConfigBuilder {
         let value = value.as_ref();
         let value = HeaderValue::from_str(value).map_err(|source| Error::InvalidHeaderValue {
             value: value.to_string(),
-            source,
+            source: source.into(),
         })?;
         self.headers.insert(header, value);
         Ok(self)

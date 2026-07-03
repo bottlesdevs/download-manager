@@ -50,6 +50,24 @@ impl Download {
         self.progress.clone()
     }
 
+    /// Pause this download and wait until its partial state has been preserved.
+    pub async fn pause(&self) -> Result<()> {
+        let (ack, result) = oneshot::channel();
+        self.cmd_tx
+            .send(SchedulerCmd::Pause { id: self.id, ack })
+            .await?;
+        result.await.map_err(|_| Error::ManagerShutdown)?
+    }
+
+    /// Resume this download and wait until it has been queued to run.
+    pub async fn resume(&self) -> Result<()> {
+        let (ack, result) = oneshot::channel();
+        self.cmd_tx
+            .send(SchedulerCmd::Resume { id: self.id, ack })
+            .await?;
+        result.await.map_err(|_| Error::ManagerShutdown)?
+    }
+
     /// Request cancellation and wait for it to take terminal effect.
     ///
     /// Resolves only once the download has reached a terminal state and any

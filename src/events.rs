@@ -28,11 +28,12 @@ pub enum DownloadState {
     Planned,
     Running,
     Retrying,
+    Pausing,
     Paused,
     Cancelling,
+    Cancelled,
     Completed,
     Failed { error: String },
-    Cancelled,
 }
 
 impl std::fmt::Display for DownloadState {
@@ -43,6 +44,7 @@ impl std::fmt::Display for DownloadState {
             DownloadState::Planned => write!(f, "Planned"),
             DownloadState::Running => write!(f, "Running"),
             DownloadState::Retrying => write!(f, "Retrying"),
+            DownloadState::Pausing => write!(f, "Pausing"),
             DownloadState::Paused => write!(f, "Paused"),
             DownloadState::Cancelling => write!(f, "Cancelling"),
             DownloadState::Completed => write!(f, "Completed"),

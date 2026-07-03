@@ -22,59 +22,42 @@ impl Event {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DownloadState {
+pub enum EventKind {
     Queued,
-    Probing,
-    Planned,
-    Running,
-    Retrying,
+    Started,
+    RetryScheduled { attempt: u32, next_delay_ms: u64 },
+    PauseStarted,
     Paused,
-    Cancelling,
+    CancellationStarted,
+    Cancelled,
     Completed,
     Failed { error: String },
-    Cancelled,
-}
-
-impl std::fmt::Display for DownloadState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DownloadState::Queued => write!(f, "Queued"),
-            DownloadState::Probing => write!(f, "Probing"),
-            DownloadState::Planned => write!(f, "Planned"),
-            DownloadState::Running => write!(f, "Running"),
-            DownloadState::Retrying => write!(f, "Retrying"),
-            DownloadState::Paused => write!(f, "Paused"),
-            DownloadState::Cancelling => write!(f, "Cancelling"),
-            DownloadState::Completed => write!(f, "Completed"),
-            DownloadState::Failed { error } => write!(f, "Failed: {}", error),
-            DownloadState::Cancelled => write!(f, "Cancelled"),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum EventKind {
-    Lifecycle { state: DownloadState },
-    RetryScheduled { attempt: u32, next_delay_ms: u64 },
-}
-
-impl std::fmt::Display for Event {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[{}]: {}", self.id, self.kind)
-    }
 }
 
 impl std::fmt::Display for EventKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EventKind::Lifecycle { state } => write!(f, "Lifecycle: {}", state),
+            EventKind::Queued => write!(f, "Queued"),
+            EventKind::Started => write!(f, "Started"),
             EventKind::RetryScheduled {
                 attempt,
                 next_delay_ms,
             } => {
                 write!(f, "Retrying: attempt {} in {} ms", attempt, next_delay_ms)
             }
+            EventKind::PauseStarted => write!(f, "Pause started"),
+            EventKind::Paused => write!(f, "Paused"),
+            EventKind::CancellationStarted => write!(f, "Cancellation started"),
+            EventKind::Cancelled => write!(f, "Cancelled"),
+            EventKind::Completed => write!(f, "Completed"),
+            EventKind::Failed { error } => write!(f, "Failed: {}", error),
         }
+    }
+}
+
+impl std::fmt::Display for Event {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}]: {}", self.id, self.kind)
     }
 }
 

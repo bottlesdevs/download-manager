@@ -5,7 +5,7 @@ use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tracing::trace;
 
-use super::{Manifest, discard_partial, manifest_path, part_path};
+use super::{Manifest, manifest_path, part_path};
 use crate::error::{Result, ResultExt};
 
 /// The `<dest>.part` file plus its durable manifest. Writes always target the
@@ -58,12 +58,6 @@ impl PartFile {
         Ok(())
     }
 
-    /// Write `bytes` at `offset` (positioned writes for future multi-segment).
-    pub async fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<()> {
-        self.file.seek(SeekFrom::Start(offset)).await?;
-        self.write(bytes).await
-    }
-
     /// fsync the data, then persist the manifest with the synced offset. The
     /// order matters: `completed_ranges` must never exceed the durable bytes.
     pub async fn checkpoint(&mut self) -> Result<()> {
@@ -87,12 +81,5 @@ impl PartFile {
         fs::rename(part_path(&dest), &dest).await?;
         let _ = fs::remove_file(manifest_path(&dest)).await.log_debug();
         Ok(dest)
-    }
-
-    /// Terminal discard (graceful cancel): remove `.part` and manifest.
-    pub async fn discard(self) -> Result<()> {
-        let PartFile { dest, file, .. } = self;
-        drop(file);
-        discard_partial(&dest).await
     }
 }

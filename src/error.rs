@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
 use tracing::instrument;
 
@@ -30,14 +30,14 @@ impl<T, E: std::error::Error> ResultExt<T, E> for std::result::Result<T, E> {
     }
 }
 
-#[derive(Error, Debug)]
+#[derive(Clone, Error, Debug)]
 pub enum Error {
     #[error("Network error: {0}")]
-    Network(#[from] reqwest::Error),
+    Network(#[source] Arc<reqwest::Error>),
     #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[source] Arc<std::io::Error>),
     #[error("Task join error: {0}")]
-    Join(#[from] tokio::task::JoinError),
+    Join(#[source] Arc<tokio::task::JoinError>),
     #[error("Download was cancelled")]
     Cancelled,
     #[error("Retry limit exceeded: {last_error}")]
@@ -50,7 +50,7 @@ pub enum Error {
     InvalidHeaderValue {
         value: String,
         #[source]
-        source: reqwest::header::InvalidHeaderValue,
+        source: Arc<reqwest::header::InvalidHeaderValue>,
     },
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
@@ -87,6 +87,24 @@ impl Error {
             Self::Cancelled | Self::Io(_) => false,
             _ => false,
         }
+    }
+}
+
+impl From<reqwest::Error> for Error {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Network(Arc::new(error))
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(Arc::new(error))
+    }
+}
+
+impl From<tokio::task::JoinError> for Error {
+    fn from(error: tokio::task::JoinError) -> Self {
+        Self::Join(Arc::new(error))
     }
 }
 

@@ -34,12 +34,10 @@ pub struct Request {
 #[derive(Debug, Builder, Clone)]
 #[builder(pattern = "owned")]
 pub(crate) struct DownloadConfig {
-    #[builder(default = "3")]
-    retries: u32,
-    #[builder(default = "false")]
-    overwrite: bool,
+    pub retries: u32,
+    pub overwrite: bool,
     #[builder(field(ty = "HeaderMap"), setter(custom))]
-    headers: HeaderMap,
+    pub headers: HeaderMap,
 }
 
 impl DownloadConfigBuilder {
@@ -64,23 +62,6 @@ impl Default for DownloadConfig {
             overwrite: false,
             headers: HeaderMap::new(),
         }
-    }
-}
-
-impl DownloadConfig {
-    /// Maximum retry attempts for retryable network errors.
-    pub fn retries(&self) -> u32 {
-        self.retries
-    }
-
-    /// Whether an existing destination file may be overwritten.
-    pub fn overwrite(&self) -> bool {
-        self.overwrite
-    }
-
-    /// Additional headers applied to the download GET request.
-    pub fn headers(&self) -> &HeaderMap {
-        &self.headers
     }
 }
 
@@ -167,10 +148,10 @@ mod tests {
 
         assert_eq!(request.url(), &url());
         assert_eq!(request.destination(), Path::new("out.bin"));
-        assert_eq!(request.config.retries(), 5);
-        assert!(request.config.overwrite());
+        assert_eq!(request.config.retries, 5);
+        assert!(request.config.overwrite);
         assert_eq!(
-            request.config.headers().get(reqwest::header::USER_AGENT),
+            request.config.headers.get(reqwest::header::USER_AGENT),
             Some(&HeaderValue::from_static("download-manager-test"))
         );
     }
@@ -179,9 +160,9 @@ mod tests {
     fn builder_uses_documented_defaults() {
         let request = Request::builder(url(), "out.bin").build().unwrap();
 
-        assert_eq!(request.config.retries(), 3);
-        assert!(!request.config.overwrite());
-        assert!(request.config.headers().is_empty());
+        assert_eq!(request.config.retries, 3);
+        assert!(!request.config.overwrite);
+        assert!(request.config.headers.is_empty());
     }
 
     #[test]

@@ -3,7 +3,7 @@ use crate::{
     download::Download,
     error::{Result, ResultExt},
     events::{Event, Progress},
-    request::{Request, RequestBuilder},
+    request::Request,
     scheduler::{Scheduler, SchedulerCmd},
 };
 use derive_builder::Builder;

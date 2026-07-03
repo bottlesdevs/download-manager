@@ -352,8 +352,8 @@ impl Scheduler {
                         self.cancel_job(job).await;
                     }
                     Err(error) if error.is_retryable() => {
-                        if job.attempt >= job.request.config.retries() {
-                            warn!(%id, attempt = job.attempt, retries = job.request.config.retries(), error = %error, "Retry limit exceeded; failing job");
+                        if job.attempt >= job.request.config.retries {
+                            warn!(%id, attempt = job.attempt, retries = job.request.config.retries, error = %error, "Retry limit exceeded; failing job");
                             job.fail(self.ctx.events.clone(), error);
                             return;
                         }

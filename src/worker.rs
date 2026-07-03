@@ -13,13 +13,18 @@ use crate::{
     storage::{self, Manifest, PartFile},
 };
 
-#[instrument(level = "info", skip(request, client, progress_tx, cancel_token), fields(url = %request.url(), destination = ?request.destination()))]
+pub(crate) enum WorkerResult {
+    Finished(DownloadResult),
+    Stopped,
+}
+
+#[instrument(level = "info", skip(request, client, progress_tx, stop_requested_token), fields(url = %request.url(), destination = ?request.destination()))]
 pub(crate) async fn run(
     request: Arc<Request>,
     client: Client,
     progress_tx: watch::Sender<Progress>,
-    cancel_token: CancellationToken,
-) -> Result<DownloadResult> {
+    stop_requested_token: CancellationToken,
+) -> Result<WorkerResult> {
     let dest = request.destination();
 
     // `overwrite` guards the *final* path; partial data lives in `<dest>.part`.
@@ -42,10 +47,22 @@ pub(crate) async fn run(
 
     // The GET is the source of truth: ask for the range we want and let the
     // response status decide. 416 means our offset is stale/complete -> restart.
-    let mut response = send_get(&request, &client, offset, prior.as_ref(), &cancel_token).await?;
+    let mut response = tokio::select! {
+        biased;
+        _ = stop_requested_token.cancelled() => {
+            return Ok(WorkerResult::Stopped);
+        }
+        response = send_get(&request, &client, offset, prior.as_ref()) => response?,
+    };
     if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
         debug!(offset, "Range not satisfiable; restarting from 0");
-        response = send_get(&request, &client, 0, None, &cancel_token).await?;
+        response = tokio::select! {
+            biased;
+            _ = stop_requested_token.cancelled() => {
+                return Ok(WorkerResult::Stopped);
+            }
+            response = send_get(&request, &client, 0, None) => response?,
+        };
     }
 
     // 206 -> server honored the range (resume); anything else (200) -> full body.
@@ -69,10 +86,11 @@ pub(crate) async fn run(
 
     loop {
         tokio::select! {
-            _ = cancel_token.cancelled() => {
-                warn!(?dest, "Cancellation received; discarding partial download");
-                part.discard().await?;
-                return Err(Error::Cancelled);
+            biased;
+            _ = stop_requested_token.cancelled() => {
+                warn!(?dest, "Stop requested; checkpointing partial download");
+                part.checkpoint().await?;
+                return Ok(WorkerResult::Stopped);
             }
             chunk = response.chunk() => {
                 match chunk {
@@ -103,10 +121,10 @@ pub(crate) async fn run(
         "Download completed successfully"
     );
 
-    Ok(DownloadResult {
+    Ok(WorkerResult::Finished(DownloadResult {
         path,
         bytes_downloaded: progress.bytes_downloaded(),
-    })
+    }))
 }
 
 /// Issue the GET, attaching `Range`/`If-Range` when resuming from `offset > 0`.
@@ -117,7 +135,6 @@ async fn send_get(
     client: &Client,
     offset: u64,
     prior: Option<&Manifest>,
-    cancel_token: &CancellationToken,
 ) -> Result<Response> {
     let mut builder = client
         .request(Method::GET, request.url().as_ref())
@@ -130,15 +147,7 @@ async fn send_get(
         }
     }
 
-    tokio::select! {
-        resp = builder.send() => Ok(resp?),
-        _ = cancel_token.cancelled() => {
-            // Cancelled before any PartFile is open; clear any leftover `.part`
-            // from a prior run so "cleanup succeeded" holds on this path too.
-            storage::discard_partial(request.destination()).await?;
-            Err(Error::Cancelled)
-        }
-    }
+    builder.send().await.map_err(Into::into)
 }
 
 fn response_header(response: &Response, name: header::HeaderName) -> Option<String> {

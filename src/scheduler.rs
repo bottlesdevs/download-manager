@@ -20,7 +20,7 @@ use crate::{
     events::{DownloadState, Event, EventKind, Progress},
     request::Request,
     storage,
-    worker::run,
+    worker::{WorkerResult, run},
 };
 
 pub struct ExponentialBackoff {
@@ -67,7 +67,7 @@ pub(crate) struct Scheduler {
     jobs: HashMap<Uuid, Job>,
     ready: VecDeque<Uuid>,
     delayed: DelayQueue<Uuid>,
-    workers: JoinSet<(Uuid, Result<DownloadResult>)>,
+    workers: JoinSet<(Uuid, Result<WorkerResult>)>,
 }
 
 impl Scheduler {
@@ -112,7 +112,7 @@ impl Scheduler {
                 },
                 Some(result) = self.workers.join_next() => {
                     if let Some((id, result)) = result.log_warn() {
-                        self.handle_worker_result(id, result);
+                        self.handle_worker_result(id, result).await;
                     }
                 }
                 Some(expired) = self.delayed.next() => {
@@ -132,19 +132,24 @@ impl Scheduler {
 
         while let Some(result) = self.workers.join_next().await {
             if let Some((id, result)) = result.log_warn() {
-                self.handle_worker_result(id, result);
+                self.handle_worker_result(id, result).await;
             }
         }
     }
 
-    fn handle_worker_result(&mut self, id: Uuid, result: Result<DownloadResult>) {
+    async fn handle_worker_result(&mut self, id: Uuid, result: Result<WorkerResult>) {
         let Some(mut job) = self.jobs.remove(&id) else {
             return;
         };
 
         match result {
-            Ok(result) => job.finish(self.ctx.events.clone(), result),
-            Err(Error::Cancelled) => job.cancel(self.ctx.events.clone()),
+            Ok(WorkerResult::Finished(result)) => job.finish(self.ctx.events.clone(), result),
+            Ok(WorkerResult::Stopped) => {
+                match storage::discard_partial(job.request.destination()).await {
+                    Ok(()) => job.cancel(self.ctx.events.clone()),
+                    Err(error) => job.fail(self.ctx.events.clone(), error),
+                }
+            }
             Err(error) if job.state != DownloadState::Cancelling && error.is_retryable() => {
                 if job.attempt >= job.request.config.retries() {
                     warn!(%id, attempt = job.attempt, retries = job.request.config.retries(), error = %error, "Retry limit exceeded; failing job");

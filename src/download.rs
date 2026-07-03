@@ -51,7 +51,7 @@ impl Download {
     }
 
     /// Pause this download and wait until its partial state has been preserved.
-    pub async fn pause(&self) -> Result<()> {
+    pub async fn pause(&mut self) -> Result<()> {
         let (ack, result) = oneshot::channel();
         self.cmd_tx
             .send(SchedulerCmd::Pause { id: self.id, ack })
@@ -60,7 +60,7 @@ impl Download {
     }
 
     /// Resume this download and wait until it has been queued to run.
-    pub async fn resume(&self) -> Result<()> {
+    pub async fn resume(&mut self) -> Result<()> {
         let (ack, result) = oneshot::channel();
         self.cmd_tx
             .send(SchedulerCmd::Resume { id: self.id, ack })
@@ -119,7 +119,7 @@ impl std::future::Future for Download {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DownloadResult {
     pub path: PathBuf,
     pub bytes_downloaded: u64,

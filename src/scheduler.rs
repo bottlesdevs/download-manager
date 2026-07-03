@@ -155,12 +155,12 @@ impl Scheduler {
 
         match result {
             Ok(WorkerResult::Finished(result)) => {
-                job.pause_waiters.take().map(|waiter| waiter.send(Ok(())));
+                job.resolve_pause_waiters(Ok(()));
                 job.finish(self.ctx.events.clone(), result)
             }
             Ok(WorkerResult::Stopped) if job.state == DownloadState::Pausing => {
                 job.state = DownloadState::Paused;
-                job.pause_waiters.take().map(|waiter| waiter.send(Ok(())));
+                job.resolve_pause_waiters(Ok(()));
                 let _ = self.ctx.events.send(Event::new(
                     id,
                     EventKind::Lifecycle {
@@ -176,9 +176,7 @@ impl Scheduler {
                 }
             }
             Err(error) if job.state == DownloadState::Pausing => {
-                job.pause_waiters
-                    .take()
-                    .map(|waiter| waiter.send(Err(error.clone())));
+                job.resolve_pause_waiters(Err(error.clone()));
                 job.fail(self.ctx.events.clone(), error);
             }
             Err(error) if job.state != DownloadState::Cancelling && error.is_retryable() => {
@@ -214,7 +212,7 @@ impl Scheduler {
                     request,
                     progress_tx,
                     result: Some(result_tx),
-                    pause_waiters: None,
+                    pause_waiters: Vec::new(),
                     attempt: 0,
                     retry_key: None,
                     cancel_token: self.ctx.cancel_root.child_token(),
@@ -278,7 +276,7 @@ impl Scheduler {
             }
             DownloadState::Running => {
                 job.state = DownloadState::Pausing;
-                job.pause_waiters = Some(ack);
+                job.pause_waiters.push(ack);
                 job.cancel_token.cancel();
                 let _ = self.ctx.events.send(Event::new(
                     id,
@@ -287,7 +285,7 @@ impl Scheduler {
                     },
                 ));
             }
-            DownloadState::Pausing => job.pause_waiters = Some(ack),
+            DownloadState::Pausing => job.pause_waiters.push(ack),
             _ => {
                 let _ = ack.send(Err(Error::InvalidRequest(
                     "download cannot be paused in its current state".into(),
@@ -401,7 +399,7 @@ pub(crate) struct Job {
     attempt: u32,
     retry_key: Option<Key>,
     result: Option<oneshot::Sender<Result<DownloadResult>>>,
-    pause_waiters: Option<oneshot::Sender<Result<()>>>,
+    pause_waiters: Vec<oneshot::Sender<Result<()>>>,
     cancel_token: CancellationToken,
     state: DownloadState,
 }
@@ -411,10 +409,14 @@ impl Job {
         self.id
     }
 
+    fn resolve_pause_waiters(&mut self, result: Result<()>) {
+        self.pause_waiters.drain(..).for_each(|waiter| {
+            let _ = waiter.send(result.clone());
+        });
+    }
+
     fn send_result(mut self, result: Result<DownloadResult>) {
-        self.pause_waiters
-            .take()
-            .and_then(|waiter| waiter.send(result.clone().map(|_| ())).into());
+        self.resolve_pause_waiters(result.clone().map(|_| ()));
         if let Some(result_tx) = self.result {
             let _ = result_tx.send(result);
         }
@@ -581,21 +583,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn running_job_pauses_after_worker_stops_and_can_resume() {
+    async fn running_job_pause_notifies_all_waiters_and_can_resume() {
         let (mut scheduler, id, mut download_result) = scheduler_with_job().await;
         let cancel_token = {
             let job = scheduler.jobs.get_mut(&id).unwrap();
             job.state = DownloadState::Running;
             job.cancel_token.clone()
         };
-        let (ack, mut pause_result) = oneshot::channel();
+        let (first_ack, mut first_pause_result) = oneshot::channel();
+        let (second_ack, mut second_pause_result) = oneshot::channel();
 
-        scheduler.pause_job(id, ack);
+        scheduler.pause_job(id, first_ack);
+        scheduler.pause_job(id, second_ack);
 
         assert!(cancel_token.is_cancelled());
         assert_eq!(scheduler.jobs[&id].state, DownloadState::Pausing);
         assert!(matches!(
-            pause_result.try_recv(),
+            first_pause_result.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            second_pause_result.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
         ));
 
@@ -603,7 +611,8 @@ mod tests {
             .handle_worker_result(id, Ok(WorkerResult::Stopped))
             .await;
 
-        assert!(pause_result.await.unwrap().is_ok());
+        assert!(first_pause_result.await.unwrap().is_ok());
+        assert!(second_pause_result.await.unwrap().is_ok());
         assert_eq!(scheduler.jobs[&id].state, DownloadState::Paused);
         assert!(matches!(
             download_result.try_recv(),

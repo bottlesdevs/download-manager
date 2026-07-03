@@ -3,11 +3,14 @@ use crate::{
     events::{Event, Progress},
     scheduler::SchedulerCmd,
 };
-use futures_core::Stream;
+use futures_core::{Stream, future::BoxFuture};
+use futures_util::{FutureExt, future::Shared};
 use std::path::PathBuf;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
+
+type SharedResult = Shared<BoxFuture<'static, Result<DownloadResult>>>;
 
 /// Handle for a single download scheduled by DownloadManager.
 ///
@@ -19,8 +22,20 @@ pub struct Download {
     id: Uuid,
     events: broadcast::Receiver<Event>,
     progress: watch::Receiver<Progress>,
-    result: oneshot::Receiver<Result<DownloadResult>>,
+    result: SharedResult,
     cmd_tx: mpsc::Sender<SchedulerCmd>,
+}
+
+impl Clone for Download {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            events: self.events.resubscribe(),
+            progress: self.progress.clone(),
+            result: self.result.clone(),
+            cmd_tx: self.cmd_tx.clone(),
+        }
+    }
 }
 
 impl Download {
@@ -31,6 +46,9 @@ impl Download {
         result: oneshot::Receiver<Result<DownloadResult>>,
         cmd_tx: mpsc::Sender<SchedulerCmd>,
     ) -> Self {
+        let result = async move { result.await.map_err(|_| Error::ManagerShutdown)? }
+            .boxed()
+            .shared();
         Download {
             id,
             events,
@@ -51,7 +69,7 @@ impl Download {
     }
 
     /// Pause this download and wait until its partial state has been preserved.
-    pub async fn pause(&mut self) -> Result<()> {
+    pub async fn pause(&self) -> Result<()> {
         let (ack, result) = oneshot::channel();
         self.cmd_tx
             .send(SchedulerCmd::Pause { id: self.id, ack })
@@ -60,7 +78,7 @@ impl Download {
     }
 
     /// Resume this download and wait until it has been queued to run.
-    pub async fn resume(&mut self) -> Result<()> {
+    pub async fn resume(&self) -> Result<()> {
         let (ack, result) = oneshot::channel();
         self.cmd_tx
             .send(SchedulerCmd::Resume { id: self.id, ack })
@@ -78,11 +96,10 @@ impl Download {
     pub async fn cancel(self) -> Result<()> {
         self.cmd_tx
             .send(SchedulerCmd::Cancel { id: self.id })
-            .await
-            .map_err(Error::from)?;
-        match self.result.await.map_err(|_| Error::ManagerShutdown)? {
-            Err(Error::Cancelled) => Ok(()),
-            Ok(_) => Ok(()),
+            .await?;
+
+        match self.result.await {
+            Ok(_) | Err(Error::Cancelled) => Ok(()),
             Err(error) => Err(error),
         }
     }
@@ -109,13 +126,8 @@ impl std::future::Future for Download {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
         use std::pin::Pin;
-        use std::task::Poll;
 
-        match Pin::new(&mut self.result).poll(cx) {
-            Poll::Ready(Ok(result)) => Poll::Ready(result),
-            Poll::Ready(Err(_)) => Poll::Ready(Err(Error::ManagerShutdown)),
-            Poll::Pending => Poll::Pending,
-        }
+        Pin::new(&mut self.result).poll(cx)
     }
 }
 
@@ -153,6 +165,30 @@ mod tests {
 
         assert_eq!(progress_rx.borrow().bytes_downloaded(), 40);
         assert_eq!(progress_rx.borrow().total_bytes(), Some(100));
+    }
+
+    #[tokio::test]
+    async fn clones_share_terminal_result() {
+        let (result_tx, result_rx) = oneshot::channel();
+        let (cmd_tx, _cmd_rx) = mpsc::channel(1);
+        let first = download(result_rx, cmd_tx);
+        let second = first.clone();
+        let path = PathBuf::from("shared-result.bin");
+
+        result_tx
+            .send(Ok(DownloadResult {
+                path: path.clone(),
+                bytes_downloaded: 42,
+            }))
+            .unwrap();
+        let (first, second) = tokio::join!(first, second);
+        let first = first.unwrap();
+        let second = second.unwrap();
+
+        assert_eq!(first.path, path);
+        assert_eq!(second.path, path);
+        assert_eq!(first.bytes_downloaded, 42);
+        assert_eq!(second.bytes_downloaded, 42);
     }
 
     #[tokio::test]

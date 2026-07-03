@@ -79,7 +79,7 @@ impl DownloadManager {
     /// - Cancellation: call [`Download::cancel()`] on the handle.
     #[instrument(level = "info", skip(self, destination), fields(url = %url))]
     pub fn download(&self, url: Url, destination: impl AsRef<Path>) -> Result<Download> {
-        let request = self.download_builder(url, destination).build()?;
+        let request = Request::builder(url, destination).build()?;
         self.enqueue(request)
     }
 
@@ -110,13 +110,6 @@ impl DownloadManager {
             result_rx,
             self.scheduler_tx.clone(),
         ))
-    }
-
-    /// Create a [RequestBuilder] to customize a download (headers, retries, overwrite, callbacks).
-    ///
-    /// Use this if you need non-default behavior or want to hook into progress/event callbacks before start().
-    pub fn download_builder(&self, url: Url, destination: impl AsRef<Path>) -> RequestBuilder {
-        Request::builder(url, destination)
     }
 
     /// Cancel all queued and in-flight downloads managed by this instance.

@@ -50,7 +50,7 @@ impl Job {
         self.id
     }
 
-    pub(super) fn resolve_pause_waiters(&mut self, result: Result<()>) {
+    fn resolve_pause_waiters(&mut self, result: Result<()>) {
         let waiters = match &mut self.state {
             JobState::Pausing { waiters } => waiters,
             _ => return,
@@ -60,29 +60,44 @@ impl Job {
         });
     }
 
-    fn send_result(mut self, result: Result<DownloadResult>) {
-        self.resolve_pause_waiters(result.clone().map(|_| ()));
+    pub(super) fn finalize(
+        mut self,
+        event_tx: broadcast::Sender<Event>,
+        result: Result<DownloadResult>,
+    ) {
+        self.resolve_pause_waiters(match &result {
+            Ok(_) => Ok(()),
+            Err(error) => Err(error.clone()),
+        });
+
+        let kind = match &result {
+            Ok(_) => EventKind::Completed,
+            Err(Error::Cancelled) => EventKind::Cancelled,
+            Err(error) => EventKind::Failed {
+                error: error.to_string(),
+            },
+        };
+        let _ = event_tx.send(Event::new(self.id(), kind));
+
         if let Some(result_tx) = self.result {
             let _ = result_tx.send(result);
         }
     }
 
-    pub(super) fn fail(self, event_tx: broadcast::Sender<Event>, error: Error) {
-        let _ = event_tx.send(Event::new(
-            self.id(),
-            EventKind::Failed {
-                error: error.to_string(),
-            },
-        ));
-        self.send_result(Err(error));
+    pub(super) fn pause(&mut self, event_tx: broadcast::Sender<Event>) {
+        self.resolve_pause_waiters(Ok(()));
+        self.state = JobState::Paused;
+        let _ = event_tx.send(Event::new(self.id(), EventKind::Paused));
     }
 
-    pub(super) fn finish(self, event_tx: broadcast::Sender<Event>, result: DownloadResult) {
-        let _ = event_tx.send(Event::new(self.id(), EventKind::Completed));
-        self.send_result(Ok(result))
-    }
-
-    pub(super) fn retry(&self, event_tx: broadcast::Sender<Event>, delay: Duration) {
+    pub(super) fn retry(
+        &mut self,
+        event_tx: broadcast::Sender<Event>,
+        timer: Key,
+        delay: Duration,
+    ) {
+        self.state = JobState::Retrying { timer };
+        self.attempt += 1;
         let _ = event_tx.send(Event::new(
             self.id(),
             EventKind::RetryScheduled {
@@ -90,10 +105,5 @@ impl Job {
                 next_delay_ms: delay.as_millis() as u64,
             },
         ));
-    }
-
-    pub(super) fn cancel(self, event_tx: broadcast::Sender<Event>) {
-        let _ = event_tx.send(Event::new(self.id(), EventKind::Cancelled));
-        self.send_result(Err(Error::Cancelled))
     }
 }

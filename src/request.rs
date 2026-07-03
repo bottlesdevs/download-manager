@@ -32,7 +32,7 @@ pub struct Request {
 /// - `overwrite`: when false, existing destination paths cause FileExists errors.
 /// - `headers`: extra HTTP headers (e.g., User-Agent).
 #[derive(Debug, Builder, Clone)]
-#[builder(pattern = "owned")]
+#[builder(pattern = "owned", default)]
 pub(crate) struct DownloadConfig {
     pub retries: u32,
     pub overwrite: bool,

@@ -110,8 +110,8 @@ impl Scheduler {
 
     async fn cancel_job(&self, job: Job) {
         match storage::discard_partial(job.request.destination()).await {
-            Ok(()) => job.cancel(self.ctx.events.clone()),
-            Err(error) => job.fail(self.ctx.events.clone(), error),
+            Ok(()) => job.finalize(self.ctx.events.clone(), Err(Error::Cancelled)),
+            Err(error) => job.finalize(self.ctx.events.clone(), Err(error)),
         }
     }
 
@@ -234,14 +234,12 @@ impl Scheduler {
                 match &mut job.state {
                     JobState::Queued => {
                         self.ready.retain(|queued| *queued != id);
-                        job.state = JobState::Paused;
-                        let _ = self.ctx.events.send(Event::new(id, EventKind::Paused));
+                        job.pause(self.ctx.events.clone());
                         let _ = ack.send(Ok(()));
                     }
                     JobState::Retrying { timer } => {
                         self.delayed.remove(timer);
-                        job.state = JobState::Paused;
-                        let _ = self.ctx.events.send(Event::new(id, EventKind::Paused));
+                        job.pause(self.ctx.events.clone());
                         let _ = ack.send(Ok(()));
                     }
                     JobState::Running { stop } => {
@@ -330,43 +328,46 @@ impl Scheduler {
                     return;
                 };
 
-                match result {
-                    Ok(WorkerResult::Finished(result)) => {
-                        job.resolve_pause_waiters(Ok(()));
-                        job.finish(self.ctx.events.clone(), result);
+                match (&job.state, result) {
+                    (_, Ok(WorkerResult::Finished(result))) => {
+                        job.finalize(self.ctx.events.clone(), Ok(result));
                     }
-                    Ok(WorkerResult::Stopped) if matches!(&job.state, JobState::Pausing { .. }) => {
-                        job.resolve_pause_waiters(Ok(()));
-                        job.state = JobState::Paused;
-                        let _ = self.ctx.events.send(Event::new(id, EventKind::Paused));
+                    (JobState::Cancelling, _) => self.cancel_job(job).await,
+                    (JobState::Pausing { .. }, Ok(WorkerResult::Stopped)) => {
+                        job.pause(self.ctx.events.clone());
                         self.jobs.insert(id, job);
                     }
-                    Ok(WorkerResult::Stopped) => {
+                    (JobState::Pausing { .. }, Err(error)) if error.is_retryable() => {
+                        if job.attempt >= job.request.config.retries {
+                            job.finalize(self.ctx.events.clone(), Err(error));
+                            return;
+                        }
+
+                        job.attempt += 1;
+                        job.pause(self.ctx.events.clone());
+                        self.jobs.insert(id, job);
+                    }
+                    (JobState::Running { .. }, Ok(WorkerResult::Stopped)) => {
                         self.cancel_job(job).await;
                     }
-                    Err(error) if matches!(&job.state, JobState::Pausing { .. }) => {
-                        job.resolve_pause_waiters(Err(error.clone()));
-                        job.fail(self.ctx.events.clone(), error);
-                    }
-                    Err(_) if matches!(&job.state, JobState::Cancelling) => {
-                        self.cancel_job(job).await;
-                    }
-                    Err(error) if error.is_retryable() => {
+                    (_, Err(error)) if error.is_retryable() => {
                         if job.attempt >= job.request.config.retries {
                             warn!(%id, attempt = job.attempt, retries = job.request.config.retries, error = %error, "Retry limit exceeded; failing job");
-                            job.fail(self.ctx.events.clone(), error);
+                            job.finalize(self.ctx.events.clone(), Err(error));
                             return;
                         }
 
                         let delay = BACKOFF_STRATEGY.next_delay(job.attempt);
-                        job.attempt += 1;
                         let timer = self.delayed.insert(id, delay);
-                        job.state = JobState::Retrying { timer };
+                        job.retry(self.ctx.events.clone(), timer, delay);
                         warn!(%id, attempt = job.attempt, delay_ms = delay.as_millis(), error = %error, "Retryable error; scheduling retry");
-                        job.retry(self.ctx.events.clone(), delay);
                         self.jobs.insert(id, job);
                     }
-                    Err(error) => job.fail(self.ctx.events.clone(), error),
+                    (_, Err(error)) => job.finalize(self.ctx.events.clone(), Err(error)),
+                    (_, _) => job.finalize(
+                        self.ctx.events.clone(),
+                        Err(Error::Unknown("invalid worker state transition".into())),
+                    ),
                 }
             }
         }
@@ -417,6 +418,15 @@ mod tests {
             .await;
 
         (scheduler, id, result_rx)
+    }
+
+    async fn retryable_error() -> Error {
+        reqwest::Client::new()
+            .get("http://127.0.0.1:0")
+            .send()
+            .await
+            .unwrap_err()
+            .into()
     }
 
     #[test]
@@ -590,6 +600,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retryable_failure_while_pausing_stays_paused() {
+        let (mut scheduler, id, mut download_result) = scheduler_with_job().await;
+        scheduler.jobs.get_mut(&id).unwrap().state = JobState::Running {
+            stop: CancellationToken::new(),
+        };
+        let (ack, pause_result) = oneshot::channel();
+        scheduler.transition_job(id, JobEvent::Pause(ack)).await;
+
+        let error = retryable_error().await;
+        assert!(error.is_retryable());
+        scheduler
+            .transition_job(id, JobEvent::Worker(Err(error)))
+            .await;
+
+        assert!(pause_result.await.unwrap().is_ok());
+        assert!(matches!(&scheduler.jobs[&id].state, JobState::Paused));
+        assert_eq!(scheduler.jobs[&id].attempt, 1);
+        assert!(matches!(
+            download_result.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
     async fn retry_expiry_requeues_job_and_emits_event() {
         let (mut scheduler, id, _download_result) = scheduler_with_job().await;
         let mut events = scheduler.ctx.events.subscribe();
@@ -623,6 +657,24 @@ mod tests {
             Err(oneshot::error::TryRecvError::Empty)
         ));
 
+        scheduler
+            .transition_job(id, JobEvent::Worker(Ok(WorkerResult::Stopped)))
+            .await;
+
+        assert!(matches!(
+            download_result.await.unwrap(),
+            Err(Error::Cancelled)
+        ));
+        assert!(!scheduler.jobs.contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn running_job_stopped_by_root_is_cancelled() {
+        let (mut scheduler, id, download_result) = scheduler_with_job().await;
+        let stop = scheduler.ctx.child_token();
+        scheduler.jobs.get_mut(&id).unwrap().state = JobState::Running { stop };
+
+        scheduler.ctx.cancel_root.cancel();
         scheduler
             .transition_job(id, JobEvent::Worker(Ok(WorkerResult::Stopped)))
             .await;

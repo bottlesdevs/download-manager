@@ -108,6 +108,13 @@ impl Scheduler {
         self.ready.push_back(id);
     }
 
+    async fn cancel_job(&self, job: Job) {
+        match storage::discard_partial(job.request.destination()).await {
+            Ok(()) => job.cancel(self.ctx.events.clone()),
+            Err(error) => job.fail(self.ctx.events.clone(), error),
+        }
+    }
+
     #[instrument(level = "info", skip(self))]
     pub async fn run(mut self) {
         loop {
@@ -316,10 +323,7 @@ impl Scheduler {
 
                 self.ready.retain(|queued| *queued != id);
                 let job = self.jobs.remove(&id).unwrap();
-                match storage::discard_partial(job.request.destination()).await {
-                    Ok(()) => job.cancel(self.ctx.events.clone()),
-                    Err(error) => job.fail(self.ctx.events.clone(), error),
-                }
+                self.cancel_job(job).await;
             }
             JobEvent::Worker(result) => {
                 let Some(mut job) = self.jobs.remove(&id) else {
@@ -338,17 +342,14 @@ impl Scheduler {
                         self.jobs.insert(id, job);
                     }
                     Ok(WorkerResult::Stopped) => {
-                        match storage::discard_partial(job.request.destination()).await {
-                            Ok(()) => job.cancel(self.ctx.events.clone()),
-                            Err(error) => job.fail(self.ctx.events.clone(), error),
-                        }
+                        self.cancel_job(job).await;
                     }
                     Err(error) if matches!(&job.state, JobState::Pausing { .. }) => {
                         job.resolve_pause_waiters(Err(error.clone()));
                         job.fail(self.ctx.events.clone(), error);
                     }
-                    Err(error) if matches!(&job.state, JobState::Cancelling) => {
-                        job.fail(self.ctx.events.clone(), error);
+                    Err(_) if matches!(&job.state, JobState::Cancelling) => {
+                        self.cancel_job(job).await;
                     }
                     Err(error) if error.is_retryable() => {
                         if job.attempt >= job.request.config.retries() {
@@ -630,6 +631,35 @@ mod tests {
             download_result.await.unwrap(),
             Err(Error::Cancelled)
         ));
+        assert!(!scheduler.jobs.contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn cancelling_job_discards_partial_when_worker_fails() {
+        let (mut scheduler, id, download_result) = scheduler_with_job().await;
+        let destination = scheduler.jobs[&id].request.destination().to_path_buf();
+        let part = destination.with_added_extension("part");
+        let manifest = part.with_added_extension("manifest.json");
+        tokio::fs::write(&part, b"partial").await.unwrap();
+        tokio::fs::write(&manifest, b"manifest").await.unwrap();
+        scheduler.jobs.get_mut(&id).unwrap().state = JobState::Running {
+            stop: CancellationToken::new(),
+        };
+
+        scheduler.transition_job(id, JobEvent::Cancel).await;
+        scheduler
+            .transition_job(
+                id,
+                JobEvent::Worker(Err(Error::Unknown("worker failed".into()))),
+            )
+            .await;
+
+        assert!(matches!(
+            download_result.await.unwrap(),
+            Err(Error::Cancelled)
+        ));
+        assert!(!tokio::fs::try_exists(part).await.unwrap());
+        assert!(!tokio::fs::try_exists(manifest).await.unwrap());
         assert!(!scheduler.jobs.contains_key(&id));
     }
 }

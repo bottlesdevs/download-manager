@@ -13,7 +13,7 @@ use crate::{
     storage::{self, Manifest, PartFile},
 };
 
-#[instrument(level = "info", skip(request, client, progress_tx, cancel_token), fields(id = %request.id(), url = %request.url(), destination = ?request.destination()))]
+#[instrument(level = "info", skip(request, client, progress_tx, cancel_token), fields(url = %request.url(), destination = ?request.destination()))]
 pub(crate) async fn run(
     request: Arc<Request>,
     client: Client,

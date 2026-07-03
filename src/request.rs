@@ -5,7 +5,6 @@ use reqwest::{
 };
 use std::path::{Path, PathBuf};
 use tracing::instrument;
-use uuid::Uuid;
 
 use crate::error::{Error, Result};
 
@@ -14,15 +13,10 @@ use crate::error::{Error, Result};
 /// Built by [RequestBuilder] and executed by the scheduler. Holds destination,
 /// headers and retry policy. Most users should prefer creating
 /// requests via [`DownloadManager::download_builder`](crate::manager::DownloadManager::download_builder).
-///
-/// `Request` must not implement [`Clone`]: its ID is the scheduler's job key,
-/// so enqueuing a clone could replace another job with the same ID. Build a
-/// fresh request for each download instead.
-#[derive(Builder)]
+#[derive(Builder, Clone)]
 #[builder(pattern = "owned")]
 #[builder(build_fn(skip))]
 pub struct Request {
-    id: Uuid,
     #[builder(setter(custom))]
     url: Url,
     #[builder(field(ty = "PathBuf"))]
@@ -93,15 +87,10 @@ impl DownloadConfig {
 impl Request {
     pub fn builder(url: Url, destination: impl AsRef<Path>) -> RequestBuilder {
         RequestBuilder {
-            id: None,
             url: Some(url),
             destination: destination.as_ref().to_path_buf(),
             config: DownloadConfigBuilder::default(),
         }
-    }
-
-    pub fn id(&self) -> Uuid {
-        self.id
     }
 
     pub fn url(&self) -> &Url {
@@ -141,7 +130,6 @@ impl RequestBuilder {
 
     #[instrument(level = "info", skip(self))]
     pub fn build(self) -> Result<Request> {
-        let id = Uuid::new_v4();
         let url = self
             .url
             .ok_or_else(|| Error::InvalidRequest("URL must be set".to_string()))?;
@@ -152,7 +140,6 @@ impl RequestBuilder {
             .map_err(|error| Error::InvalidConfig(error.to_string()))?;
 
         Ok(Request {
-            id,
             url: url.clone(),
             destination: destination.clone(),
             config,
@@ -177,7 +164,6 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let second = Request::builder(url(), "out.bin").build().unwrap();
 
         assert_eq!(request.url(), &url());
         assert_eq!(request.destination(), Path::new("out.bin"));
@@ -187,7 +173,6 @@ mod tests {
             request.config.headers().get(reqwest::header::USER_AGENT),
             Some(&HeaderValue::from_static("download-manager-test"))
         );
-        assert_ne!(request.id(), second.id());
     }
 
     #[test]

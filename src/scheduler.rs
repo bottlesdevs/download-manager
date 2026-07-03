@@ -43,6 +43,7 @@ static BACKOFF_STRATEGY: ExponentialBackoff = ExponentialBackoff {
 
 pub(crate) enum SchedulerCmd {
     Enqueue {
+        id: Uuid,
         request: Arc<Request>,
         progress_tx: watch::Sender<Progress>,
         result_tx: oneshot::Sender<Result<DownloadResult>>,
@@ -166,14 +167,15 @@ impl Scheduler {
     async fn handle_cmd(&mut self, cmd: SchedulerCmd) {
         match cmd {
             SchedulerCmd::Enqueue {
+                id,
                 request,
                 progress_tx,
                 result_tx,
                 cancel_token,
             } => {
-                let id = request.id();
                 debug!(%id, url = %request.url(), destination = ?request.destination(), "Enqueue request");
                 self.schedule(Job {
+                    id,
                     request,
                     progress_tx,
                     result: Some(result_tx),
@@ -272,6 +274,7 @@ impl Scheduler {
 }
 
 pub(crate) struct Job {
+    id: Uuid,
     request: Arc<Request>,
     progress_tx: watch::Sender<Progress>,
     attempt: u32,
@@ -282,7 +285,7 @@ pub(crate) struct Job {
 
 impl Job {
     fn id(&self) -> Uuid {
-        self.request.id()
+        self.id
     }
 
     fn send_result(self, result: Result<DownloadResult>) {
@@ -366,13 +369,14 @@ mod tests {
             .build()
             .unwrap(),
         );
-        let id = request.id();
+        let id = Uuid::new_v4();
         let cancel_token = CancellationToken::new();
         let (progress_tx, _progress_rx) = watch::channel(Progress::new(0, None));
         let (result_tx, result_rx) = oneshot::channel();
 
         scheduler
             .handle_cmd(SchedulerCmd::Enqueue {
+                id,
                 request,
                 progress_tx,
                 result_tx,

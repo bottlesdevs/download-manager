@@ -47,7 +47,6 @@ pub(crate) enum SchedulerCmd {
         request: Arc<Request>,
         progress_tx: watch::Sender<Progress>,
         result_tx: oneshot::Sender<Result<DownloadResult>>,
-        cancel_token: CancellationToken,
     },
     Cancel {
         id: Uuid,
@@ -176,7 +175,6 @@ impl Scheduler {
                 request,
                 progress_tx,
                 result_tx,
-                cancel_token,
             } => {
                 debug!(%id, url = %request.url(), destination = ?request.destination(), "Enqueue request");
                 self.schedule(Job {
@@ -185,7 +183,7 @@ impl Scheduler {
                     progress_tx,
                     result: Some(result_tx),
                     attempt: 0,
-                    cancel_token,
+                    cancel_token: self.ctx.cancel_root.child_token(),
                     state: DownloadState::Queued,
                 });
             }
@@ -263,7 +261,8 @@ impl Scheduler {
 
             let request = job.request.clone();
             let progress_tx = job.progress_tx.clone();
-            let cancel_token = job.cancel_token.clone();
+            let cancel_token = self.ctx.child_token();
+            job.cancel_token = cancel_token.clone();
             let client = self.ctx.client.clone();
 
             info!(%id, "Dispatching job to worker");
@@ -332,7 +331,6 @@ impl Job {
     }
 
     fn cancel(self, event_tx: broadcast::Sender<Event>) {
-        self.cancel_token.cancel();
         let _ = event_tx.send(Event::new(
             self.id(),
             EventKind::Lifecycle {
@@ -375,7 +373,6 @@ mod tests {
             .unwrap(),
         );
         let id = Uuid::new_v4();
-        let cancel_token = CancellationToken::new();
         let (progress_tx, _progress_rx) = watch::channel(Progress::new(0, None));
         let (result_tx, result_rx) = oneshot::channel();
 
@@ -385,12 +382,10 @@ mod tests {
                 request,
                 progress_tx,
                 result_tx,
-                cancel_token: cancel_token.clone(),
             })
             .await;
         scheduler.handle_cmd(SchedulerCmd::Cancel { id }).await;
 
-        assert!(cancel_token.is_cancelled());
         assert!(scheduler.jobs.is_empty());
         assert!(matches!(result_rx.await.unwrap(), Err(Error::Cancelled)));
     }

@@ -95,14 +95,12 @@ impl DownloadManager {
         let event_rx = self.ctx.events.subscribe();
         let (progress_tx, progress_rx) = watch::channel(Progress::new(0, None));
         let (result_tx, result_rx) = oneshot::channel();
-        let cancel_token = self.ctx.child_token();
 
         self.scheduler_tx.try_send(SchedulerCmd::Enqueue {
             id,
             request: Arc::new(request),
             progress_tx,
             result_tx,
-            cancel_token: cancel_token.clone(),
         })?;
 
         Ok(Download::new(

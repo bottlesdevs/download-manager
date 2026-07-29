@@ -5,9 +5,9 @@ edition.workspace = true
 
 [dependencies]
 reqwest.workspace = true
-tokio.workspace = true
-tokio-stream.workspace = true
-tokio-util.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true, features = ["sync"] }
+tokio-util = { workspace = true, features = ["full"] }
 futures-core.workspace = true
 futures-util.workspace = true
 thiserror.workspace = true

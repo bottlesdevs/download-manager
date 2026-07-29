@@ -1,8 +1,8 @@
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 
-use tokio::fs::{self, File, OpenOptions};
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use async_fs::{self as fs, File, OpenOptions};
+use futures_util::io::{AsyncSeekExt, AsyncWriteExt};
 use tracing::trace;
 
 use super::{Manifest, manifest_path, part_path};

@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
-use reqwest::{Client, Method, Response, StatusCode, header};
-use tokio::sync::watch;
+use async_broadcast::Sender;
+use futures_lite::io::AsyncReadExt;
+use futures_util::{FutureExt, select_biased};
+use http::{Request as HttpRequest, Response, StatusCode, header};
+use http_client::HttpClient;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -18,58 +21,60 @@ pub(crate) enum WorkerResult {
     Stopped,
 }
 
-#[instrument(level = "info", skip(request, client, progress_tx, stop_requested_token), fields(url = %request.url(), destination = ?request.destination()))]
+#[instrument(level = "info", skip(request, client, progress_tx, stop), fields(url = %request.url(), destination = ?request.destination()))]
 pub(crate) async fn run(
     request: Arc<Request>,
-    client: Client,
-    progress_tx: watch::Sender<Progress>,
-    stop_requested_token: CancellationToken,
+    client: Arc<dyn HttpClient>,
+    progress_tx: Sender<Progress>,
+    stop: CancellationToken,
 ) -> Result<WorkerResult> {
     let dest = request.destination();
 
-    // `overwrite` guards the *final* path; partial data lives in `<dest>.part`.
-    if tokio::fs::try_exists(dest).await? && !request.config.overwrite {
-        warn!(?dest, "Destination exists and overwrite=false; failing");
-        return Err(Error::FileExists {
-            path: dest.to_path_buf(),
-        });
+    match async_fs::metadata(dest).await {
+        Ok(_) if !request.config.overwrite => {
+            warn!(?dest, "Destination exists and overwrite=false; failing");
+            return Err(Error::FileExists {
+                path: dest.to_path_buf(),
+            });
+        }
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
     }
 
-    // Resume only from a durable, validator-bearing prefix that is actually on
-    // disk (clamp against the real `.part` length, never trust the manifest alone).
     let prior = Manifest::load(dest)
         .await
         .filter(|manifest| manifest.is_resumable_for(request.url().as_str()));
     let offset = match &prior {
-        Some(m) => m.resume_offset().min(storage::part_len(dest).await?),
+        Some(manifest) => manifest.resume_offset().min(storage::part_len(dest).await?),
         None => 0,
     };
 
-    // The GET is the source of truth: ask for the range we want and let the
-    // response status decide. 416 means our offset is stale/complete -> restart.
-    let mut response = tokio::select! {
-        biased;
-        _ = stop_requested_token.cancelled() => {
-            return Ok(WorkerResult::Stopped);
+    let mut response = {
+        let stopped = stop.cancelled().fuse();
+        let response = send_get(&request, client.as_ref(), offset, prior.as_ref()).fuse();
+        futures_util::pin_mut!(stopped, response);
+        select_biased! {
+            _ = stopped => return Ok(WorkerResult::Stopped),
+            response = response => response?,
         }
-        response = send_get(&request, &client, offset, prior.as_ref()) => response?,
     };
     if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
         debug!(offset, "Range not satisfiable; restarting from 0");
-        response = tokio::select! {
-            biased;
-            _ = stop_requested_token.cancelled() => {
-                return Ok(WorkerResult::Stopped);
-            }
-            response = send_get(&request, &client, 0, None) => response?,
+        let stopped = stop.cancelled().fuse();
+        let restarted = send_get(&request, client.as_ref(), 0, None).fuse();
+        futures_util::pin_mut!(stopped, restarted);
+        response = select_biased! {
+            _ = stopped => return Ok(WorkerResult::Stopped),
+            response = restarted => response?,
         };
     }
 
-    // 206 -> server honored the range (resume); anything else (200) -> full body.
     let resumed = response.status() == StatusCode::PARTIAL_CONTENT;
-    let mut response = response.error_for_status()?;
+    if !response.status().is_success() {
+        return Err(Error::HttpStatus(response.status()));
+    }
     let start = if resumed { offset } else { 0 };
-    let total = response.content_length().map(|remaining| start + remaining);
+    let total = content_length(&response).map(|remaining| start + remaining);
 
     let mut manifest = Manifest {
         url: request.url().to_string(),
@@ -81,39 +86,41 @@ pub(crate) async fn run(
     manifest.set_contiguous(start);
     let mut part = PartFile::open(dest, start, manifest).await?;
     let mut progress = Progress::new(start, total);
-    progress_tx.send_replace(progress);
+    let _ = progress_tx.try_broadcast(progress);
     debug!(start, ?total, resumed, "Transfer started");
 
+    let mut buffer = vec![0; 64 * 1024];
     loop {
-        tokio::select! {
-            biased;
-            _ = stop_requested_token.cancelled() => {
+        let stopped = stop.cancelled().fuse();
+        let read = response.body_mut().read(&mut buffer).fuse();
+        futures_util::pin_mut!(stopped, read);
+        let read = select_biased! {
+            _ = stopped => {
                 warn!(?dest, "Stop requested; checkpointing partial download");
                 part.checkpoint().await?;
                 return Ok(WorkerResult::Stopped);
             }
-            chunk = response.chunk() => {
-                match chunk {
-                    Ok(Some(chunk)) => {
-                        part.write(&chunk).await?;
-                        if progress.add(chunk.len() as u64) {
-                            progress_tx.send_replace(progress);
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        // Keep `.part` + manifest so a retry / next run can resume.
-                        let _ = part.checkpoint().await.log_warn();
-                        error!(error = %e, ?dest, "Transfer error; keeping partial for resume");
-                        return Err(e.into());
-                    }
+            read = read => read,
+        };
+
+        match read {
+            Ok(0) => break,
+            Ok(read) => {
+                part.write(&buffer[..read]).await?;
+                if progress.add(read as u64) {
+                    let _ = progress_tx.try_broadcast(progress);
                 }
+            }
+            Err(error) => {
+                let _ = part.checkpoint().await.log_warn();
+                error!(%error, ?dest, "Transfer error; keeping partial for resume");
+                return Err(Error::Network(error.to_string().into()));
             }
         }
     }
 
     progress.force_update();
-    progress_tx.send_replace(progress);
+    let _ = progress_tx.try_broadcast(progress);
     let path = part.finalize().await?;
     info!(
         ?path,
@@ -127,30 +134,55 @@ pub(crate) async fn run(
     }))
 }
 
-/// Issue the GET, attaching `Range`/`If-Range` when resuming from `offset > 0`.
-/// Does not call `error_for_status`: the caller inspects the raw status first so
-/// it can handle `416` (range not satisfiable) before treating it as an error.
 async fn send_get(
     request: &Request,
-    client: &Client,
+    client: &dyn HttpClient,
     offset: u64,
     prior: Option<&Manifest>,
-) -> Result<Response> {
-    let mut builder = client
-        .request(Method::GET, request.url().as_ref())
-        .headers(request.config.headers.clone());
+) -> Result<Response<http_client::Body>> {
+    let mut http_request = HttpRequest::get(request.url().as_str())
+        .body(Vec::new())
+        .map_err(|error| Error::InvalidRequest(error.to_string()))?;
+    *http_request.headers_mut() = request.config.headers.clone();
 
     if offset > 0 {
-        builder = builder.header(header::RANGE, format!("bytes={offset}-"));
+        let value = format!("bytes={offset}-");
+        http_request.headers_mut().insert(
+            header::RANGE,
+            value.parse().map_err(|source| Error::InvalidHeaderValue {
+                value,
+                source: Arc::new(source),
+            })?,
+        );
         if let Some(validator) = prior.and_then(Manifest::validator) {
-            builder = builder.header(header::IF_RANGE, validator);
+            let value = validator.to_string();
+            http_request.headers_mut().insert(
+                header::IF_RANGE,
+                value.parse().map_err(|source| Error::InvalidHeaderValue {
+                    value,
+                    source: Arc::new(source),
+                })?,
+            );
         }
     }
 
-    builder.send().await.map_err(Into::into)
+    client.send(http_request).await.map_err(Into::into)
 }
 
-fn response_header(response: &Response, name: header::HeaderName) -> Option<String> {
+fn content_length(response: &Response<http_client::Body>) -> Option<u64> {
+    response
+        .headers()
+        .get(header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()
+}
+
+fn response_header(
+    response: &Response<http_client::Body>,
+    name: header::HeaderName,
+) -> Option<String> {
     response
         .headers()
         .get(name)

@@ -6,14 +6,14 @@ use crate::{
     request::Request,
     scheduler::{Scheduler, SchedulerCmd},
 };
+use async_channel::{Receiver, Sender};
 use derive_builder::Builder;
-use futures_core::Stream;
-use reqwest::Url;
+use futures_core::{Stream, future::BoxFuture};
+use futures_util::FutureExt;
+use http_client::HttpClient;
 use std::{num::NonZeroUsize, path::Path, sync::Arc};
-use tokio::sync::{mpsc, oneshot, watch};
-use tokio::task::JoinHandle;
-use tokio_stream::{StreamExt, wrappers::BroadcastStream};
-use tracing::{info, instrument, warn};
+use tracing::{info, instrument};
+use url::Url;
 use uuid::Uuid;
 
 /// Entry point for scheduling, observing, and cancelling downloads.
@@ -27,9 +27,9 @@ use uuid::Uuid;
 /// - Use events() to get a fallible-safe stream that drops lagged messages.
 /// - Use shutdown() for a graceful stop: it cancels all work and waits for workers to finish.
 pub struct DownloadManager {
-    scheduler_tx: mpsc::Sender<SchedulerCmd>,
+    scheduler_tx: Sender<SchedulerCmd>,
     ctx: Arc<Context>,
-    scheduler: JoinHandle<()>,
+    done: Receiver<()>,
 }
 
 impl Drop for DownloadManager {
@@ -38,37 +38,54 @@ impl Drop for DownloadManager {
     }
 }
 
-impl Default for DownloadManager {
-    #[instrument(level = "debug")]
-    fn default() -> Self {
-        DownloadManager::with_config(DownloadManagerConfig::default())
+/// Scheduler loop returned by [`DownloadManager::new`].
+///
+/// The caller must spawn or otherwise poll this future.
+#[must_use = "the download scheduler must be spawned or polled"]
+pub struct SchedulerFuture(BoxFuture<'static, ()>);
+
+impl std::future::Future for SchedulerFuture {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        self.get_mut().0.as_mut().poll(cx)
     }
 }
 
 impl DownloadManager {
-    /// Create a new builder for DownloadManager.
-    ///
-    /// You must set a positive max_concurrent on the builder before build().
-    /// If you want a sensible default quickly, see [DownloadManager::default()].
-    #[instrument(level = "info", skip(config))]
-    pub fn with_config(config: DownloadManagerConfig) -> DownloadManager {
-        let (cmd_tx, cmd_rx) = mpsc::channel(1024);
-        let ctx = Context::new();
+    /// Create a manager and its executor-independent scheduler future.
+    #[instrument(level = "info", skip(client, config))]
+    pub fn new(
+        client: Arc<dyn HttpClient>,
+        config: DownloadManagerConfig,
+    ) -> (DownloadManager, SchedulerFuture) {
+        let (cmd_tx, cmd_rx) = async_channel::bounded(1024);
+        let (done_tx, done) = async_channel::bounded(1);
+        let ctx = Context::new(client);
         let scheduler = Scheduler::new(config.max_concurrent, ctx.clone(), cmd_rx);
-        let scheduler = tokio::spawn(scheduler.run());
+        let scheduler = SchedulerFuture(
+            async move {
+                scheduler.run().await;
+                let _ = done_tx.send(()).await;
+            }
+            .boxed(),
+        );
 
         let manager = DownloadManager {
             scheduler_tx: cmd_tx,
             ctx: ctx.clone(),
-            scheduler,
+            done,
         };
 
         info!(
             max_concurrent = config.max_concurrent,
-            "DownloadManager initialized and scheduler started"
+            "DownloadManager initialized"
         );
 
-        manager
+        (manager, scheduler)
     }
 
     /// Start a download with default request settings.
@@ -92,9 +109,11 @@ impl DownloadManager {
     #[instrument(level = "info", skip(self, request))]
     pub fn enqueue(&self, request: Request) -> Result<Download> {
         let id = Uuid::new_v4();
-        let event_rx = self.ctx.events.subscribe();
-        let (progress_tx, progress_rx) = watch::channel(Progress::new(0, None));
-        let (result_tx, result_rx) = oneshot::channel();
+        let event_rx = self.ctx.events.new_receiver();
+        let (mut progress_tx, progress_rx) = async_broadcast::broadcast(1);
+        progress_tx.set_overflow(true);
+        let _ = progress_tx.try_broadcast(Progress::new(0, None));
+        let (result_tx, result_rx) = async_channel::bounded(1);
 
         self.scheduler_tx.try_send(SchedulerCmd::Enqueue {
             id,
@@ -141,7 +160,7 @@ impl DownloadManager {
     /// Internally wraps the broadcast receiver and filters out lagged/closed errors.
     #[instrument(level = "debug", skip(self))]
     pub fn events(&self) -> impl Stream<Item = Event> + 'static {
-        BroadcastStream::new(self.ctx.events.subscribe()).filter_map(|result| result.log_warn())
+        self.ctx.events.new_receiver()
     }
 
     /// Gracefully stop the manager.
@@ -150,10 +169,10 @@ impl DownloadManager {
     /// - Prevents new tasks from being scheduled and waits for all worker tasks to finish.
     /// Call this before dropping the manager if you need deterministic teardown.
     #[instrument(level = "info", skip(self))]
-    pub async fn shutdown(mut self) {
+    pub async fn shutdown(self) {
         info!("Shutting down DownloadManager");
         self.ctx.cancel_root.cancel();
-        let _ = (&mut self.scheduler).await.log_warn();
+        let _ = self.done.recv().await;
         info!("DownloadManager shutdown complete");
     }
 }
@@ -176,32 +195,45 @@ impl Default for DownloadManagerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::Response;
+    use http_client::{MockClient, body};
 
-    #[tokio::test]
-    async fn dropping_manager_stops_scheduler() {
-        let context = {
-            let manager = DownloadManager::default();
-            Arc::downgrade(&manager.ctx)
-        };
-
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while context.upgrade().is_some() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("scheduler should release its context after manager drop");
+    fn mock() -> Arc<dyn HttpClient> {
+        Arc::new(MockClient::new(|_| {
+            Ok(Response::builder().status(200).body(body([]))?)
+        }))
     }
 
-    #[tokio::test]
-    async fn concurrency_limit_can_be_changed_at_runtime() {
-        let manager = DownloadManager::default();
+    #[test]
+    fn dropping_manager_stops_scheduler() {
+        let executor = async_executor::Executor::new();
+        futures_lite::future::block_on(executor.run(async {
+            let (manager, scheduler) =
+                DownloadManager::new(mock(), DownloadManagerConfig::default());
+            let context = Arc::downgrade(&manager.ctx);
+            let scheduler = executor.spawn(scheduler);
 
-        manager
-            .set_max_concurrent(NonZeroUsize::new(5).unwrap())
-            .await
-            .unwrap();
+            drop(manager);
+            scheduler.await;
 
-        manager.shutdown().await;
+            assert!(context.upgrade().is_none());
+        }));
+    }
+
+    #[test]
+    fn concurrency_limit_can_be_changed_at_runtime() {
+        let executor = async_executor::Executor::new();
+        futures_lite::future::block_on(executor.run(async {
+            let (manager, scheduler) =
+                DownloadManager::new(mock(), DownloadManagerConfig::default());
+            let scheduler = executor.spawn(scheduler);
+
+            manager
+                .set_max_concurrent(NonZeroUsize::new(5).unwrap())
+                .await
+                .unwrap();
+            manager.shutdown().await;
+            scheduler.await;
+        }));
     }
 }

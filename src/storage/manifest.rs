@@ -1,7 +1,7 @@
 use std::path::Path;
 
+use async_fs as fs;
 use serde::{Deserialize, Serialize};
-use tokio::fs;
 use tracing::warn;
 
 use super::manifest_path;
@@ -152,15 +152,18 @@ mod tests {
         assert!(!manifest.is_resumable_for("https://example.com/file"));
     }
 
-    #[tokio::test]
-    async fn corrupt_manifest_is_treated_as_absent() {
-        let dir = std::env::temp_dir().join(format!("dm-manifest-test-{}", uuid::Uuid::new_v4()));
-        let dest = dir.join("file.bin");
-        fs::create_dir_all(&dir).await.unwrap();
-        fs::write(manifest_path(&dest), b"not-json").await.unwrap();
+    #[test]
+    fn corrupt_manifest_is_treated_as_absent() {
+        futures_lite::future::block_on(async {
+            let dir =
+                std::env::temp_dir().join(format!("dm-manifest-test-{}", uuid::Uuid::new_v4()));
+            let dest = dir.join("file.bin");
+            fs::create_dir_all(&dir).await.unwrap();
+            fs::write(manifest_path(&dest), b"not-json").await.unwrap();
 
-        assert!(Manifest::load(&dest).await.is_none());
+            assert!(Manifest::load(&dest).await.is_none());
 
-        let _ = fs::remove_dir_all(dir).await;
+            let _ = fs::remove_dir_all(dir).await;
+        });
     }
 }

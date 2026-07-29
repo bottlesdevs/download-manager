@@ -5,13 +5,12 @@ pub(crate) use file::PartFile;
 pub(crate) use manifest::Manifest;
 
 use std::path::{Path, PathBuf};
-use tokio::fs;
 
 use crate::error::Result;
 
 /// Bytes actually present in the `.part` file (0 if it is absent).
 pub(crate) async fn part_len(dest: &Path) -> Result<u64> {
-    match fs::metadata(part_path(dest)).await {
+    match async_fs::metadata(part_path(dest)).await {
         Ok(metadata) => Ok(metadata.len()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
         Err(error) => Err(error.into()),
@@ -23,7 +22,7 @@ pub(crate) async fn part_len(dest: &Path) -> Result<u64> {
 /// failure; missing sidecars are fine.
 pub(crate) async fn discard_partial(dest: &Path) -> Result<()> {
     for path in [part_path(dest), manifest_path(dest)] {
-        match fs::remove_file(path).await {
+        match async_fs::remove_file(path).await {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
@@ -48,8 +47,7 @@ mod tests {
     /// a drop, resumes at the recorded offset, and finalizes to the final path.
     #[test]
     fn checkpoint_then_resume_then_finalize() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
+        futures_lite::future::block_on(async {
             let mut dir = std::env::temp_dir();
             dir.push(format!("dm-storage-test-{}", uuid::Uuid::new_v4()));
             let dest = dir.join("file.bin");
@@ -80,27 +78,26 @@ mod tests {
             part.write(b"world").await.unwrap();
             let path = part.finalize().await.unwrap();
 
-            assert_eq!(fs::read(&path).await.unwrap(), b"helloworld");
+            assert_eq!(async_fs::read(&path).await.unwrap(), b"helloworld");
             // Finalize cleans up the sidecars.
             assert!(Manifest::load(&dest).await.is_none());
             assert_eq!(part_len(&dest).await.unwrap(), 0);
 
-            let _ = fs::remove_dir_all(&dir).await;
+            let _ = async_fs::remove_dir_all(&dir).await;
         });
     }
 
     #[test]
     fn discard_partial_reports_removal_failure() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
+        futures_lite::future::block_on(async {
             let mut dir = std::env::temp_dir();
             dir.push(format!("dm-discard-test-{}", uuid::Uuid::new_v4()));
             let dest = dir.join("file.bin");
 
-            fs::create_dir_all(part_path(&dest)).await.unwrap();
+            async_fs::create_dir_all(part_path(&dest)).await.unwrap();
             assert!(discard_partial(&dest).await.is_err());
 
-            let _ = fs::remove_dir_all(&dir).await;
+            let _ = async_fs::remove_dir_all(&dir).await;
         });
     }
 }

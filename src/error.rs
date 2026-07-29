@@ -1,4 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
+
+use http::StatusCode;
 use thiserror::Error;
 use tracing::instrument;
 
@@ -33,11 +35,11 @@ impl<T, E: std::error::Error> ResultExt<T, E> for std::result::Result<T, E> {
 #[derive(Clone, Error, Debug)]
 pub enum Error {
     #[error("Network error: {0}")]
-    Network(#[source] Arc<reqwest::Error>),
+    Network(Arc<str>),
+    #[error("HTTP request failed with status {0}")]
+    HttpStatus(StatusCode),
     #[error("I/O error: {0}")]
     Io(#[source] Arc<std::io::Error>),
-    #[error("Task join error: {0}")]
-    Join(#[source] Arc<tokio::task::JoinError>),
     #[error("Download was cancelled")]
     Cancelled,
     #[error("Retry limit exceeded: {last_error}")]
@@ -50,7 +52,7 @@ pub enum Error {
     InvalidHeaderValue {
         value: String,
         #[source]
-        source: Arc<reqwest::header::InvalidHeaderValue>,
+        source: Arc<http::header::InvalidHeaderValue>,
     },
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
@@ -69,30 +71,22 @@ pub enum Error {
 impl Error {
     /// Classify whether this error should be retried by the scheduler.
     ///
-    /// Returns true for transient reqwest errors (timeout, connect, request) and HTTP 5xx.
-    /// If the HTTP status is unavailable, the error is treated as retryable by default.
+    /// Returns true for transport errors and HTTP 5xx.
     /// Returns false for Cancelled, Io, and other non-transient variants.
     #[instrument(level = "trace", skip(self))]
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Network(network_err) => {
-                network_err.is_timeout()
-                    || network_err.is_connect()
-                    || network_err.is_request()
-                    || network_err
-                        .status()
-                        .map(|status_code| status_code.is_server_error())
-                        .unwrap_or(true)
-            }
+            Self::Network(_) => true,
+            Self::HttpStatus(status) => status.is_server_error(),
             Self::Cancelled | Self::Io(_) => false,
             _ => false,
         }
     }
 }
 
-impl From<reqwest::Error> for Error {
-    fn from(error: reqwest::Error) -> Self {
-        Self::Network(Arc::new(error))
+impl From<http_client::Error> for Error {
+    fn from(error: http_client::Error) -> Self {
+        Self::Network(error.to_string().into())
     }
 }
 
@@ -102,23 +96,17 @@ impl From<std::io::Error> for Error {
     }
 }
 
-impl From<tokio::task::JoinError> for Error {
-    fn from(error: tokio::task::JoinError) -> Self {
-        Self::Join(Arc::new(error))
-    }
-}
-
-impl<T> From<tokio::sync::mpsc::error::SendError<T>> for Error {
-    fn from(_: tokio::sync::mpsc::error::SendError<T>) -> Self {
+impl<T> From<async_channel::SendError<T>> for Error {
+    fn from(_: async_channel::SendError<T>) -> Self {
         Self::CommandChannelClosed
     }
 }
 
-impl<T> From<tokio::sync::mpsc::error::TrySendError<T>> for Error {
-    fn from(error: tokio::sync::mpsc::error::TrySendError<T>) -> Self {
+impl<T> From<async_channel::TrySendError<T>> for Error {
+    fn from(error: async_channel::TrySendError<T>) -> Self {
         match error {
-            tokio::sync::mpsc::error::TrySendError::Full(_) => Self::CommandQueueFull,
-            tokio::sync::mpsc::error::TrySendError::Closed(_) => Self::CommandChannelClosed,
+            async_channel::TrySendError::Full(_) => Self::CommandQueueFull,
+            async_channel::TrySendError::Closed(_) => Self::CommandChannelClosed,
         }
     }
 }

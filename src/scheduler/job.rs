@@ -1,7 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
-use tokio::sync::{broadcast, oneshot, watch};
-use tokio_util::{sync::CancellationToken, time::delay_queue::Key};
+use async_broadcast::Sender as BroadcastSender;
+use async_channel::Sender;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
@@ -14,24 +15,18 @@ use crate::{
 
 pub(super) enum JobState {
     Queued,
-    Running {
-        stop: CancellationToken,
-    },
-    Retrying {
-        timer: Key,
-    },
-    Pausing {
-        waiters: Vec<oneshot::Sender<Result<()>>>,
-    },
+    Running { stop: CancellationToken },
+    Retrying { attempt: u32 },
+    Pausing { waiters: Vec<Sender<Result<()>>> },
     Paused,
     Cancelling,
 }
 
 pub(super) enum JobEvent {
     Dispatch,
-    RetryElapsed,
-    Pause(oneshot::Sender<Result<()>>),
-    Resume(oneshot::Sender<Result<()>>),
+    RetryElapsed(u32),
+    Pause(Sender<Result<()>>),
+    Resume(Sender<Result<()>>),
     Cancel,
     Worker(Result<WorkerResult>),
 }
@@ -39,9 +34,9 @@ pub(super) enum JobEvent {
 pub(super) struct Job {
     pub(super) id: Uuid,
     pub(super) request: Arc<Request>,
-    pub(super) progress_tx: watch::Sender<Progress>,
+    pub(super) progress_tx: BroadcastSender<Progress>,
     pub(super) attempt: u32,
-    pub(super) result: Option<oneshot::Sender<Result<DownloadResult>>>,
+    pub(super) result: Option<Sender<Result<DownloadResult>>>,
     pub(super) state: JobState,
 }
 
@@ -56,13 +51,13 @@ impl Job {
             _ => return,
         };
         waiters.drain(..).for_each(|waiter| {
-            let _ = waiter.send(result.clone());
+            let _ = waiter.try_send(result.clone());
         });
     }
 
     pub(super) fn finalize(
         mut self,
-        event_tx: broadcast::Sender<Event>,
+        event_tx: BroadcastSender<Event>,
         result: Result<DownloadResult>,
     ) {
         self.resolve_pause_waiters(match &result {
@@ -77,28 +72,25 @@ impl Job {
                 error: error.to_string(),
             },
         };
-        let _ = event_tx.send(Event::new(self.id(), kind));
+        let _ = event_tx.try_broadcast(Event::new(self.id(), kind));
 
         if let Some(result_tx) = self.result {
-            let _ = result_tx.send(result);
+            let _ = result_tx.try_send(result);
         }
     }
 
-    pub(super) fn pause(&mut self, event_tx: broadcast::Sender<Event>) {
+    pub(super) fn pause(&mut self, event_tx: BroadcastSender<Event>) {
         self.resolve_pause_waiters(Ok(()));
         self.state = JobState::Paused;
-        let _ = event_tx.send(Event::new(self.id(), EventKind::Paused));
+        let _ = event_tx.try_broadcast(Event::new(self.id(), EventKind::Paused));
     }
 
-    pub(super) fn retry(
-        &mut self,
-        event_tx: broadcast::Sender<Event>,
-        timer: Key,
-        delay: Duration,
-    ) {
-        self.state = JobState::Retrying { timer };
+    pub(super) fn retry(&mut self, event_tx: BroadcastSender<Event>, delay: Duration) {
         self.attempt += 1;
-        let _ = event_tx.send(Event::new(
+        self.state = JobState::Retrying {
+            attempt: self.attempt,
+        };
+        let _ = event_tx.try_broadcast(Event::new(
             self.id(),
             EventKind::RetryScheduled {
                 attempt: self.attempt,

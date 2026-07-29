@@ -1,10 +1,8 @@
 use derive_builder::Builder;
-use reqwest::{
-    Url,
-    header::{HeaderMap, HeaderValue, IntoHeaderName},
-};
+use http::header::{HeaderMap, HeaderValue, IntoHeaderName};
 use std::path::{Path, PathBuf};
 use tracing::instrument;
+use url::Url;
 
 use crate::error::{Error, Result};
 
@@ -92,7 +90,7 @@ impl RequestBuilder {
 
     /// Convenience for setting the User-Agent header.
     pub fn user_agent(self, user_agent: impl AsRef<str>) -> Result<Self> {
-        self.header(reqwest::header::USER_AGENT, user_agent)
+        self.header(http::header::USER_AGENT, user_agent)
     }
 
     /// Control whether an existing destination file may be overwritten.
@@ -151,7 +149,7 @@ mod tests {
         assert_eq!(request.config.retries, 5);
         assert!(request.config.overwrite);
         assert_eq!(
-            request.config.headers.get(reqwest::header::USER_AGENT),
+            request.config.headers.get(http::header::USER_AGENT),
             Some(&HeaderValue::from_static("download-manager-test"))
         );
     }

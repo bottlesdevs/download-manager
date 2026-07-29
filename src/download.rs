@@ -1,13 +1,13 @@
 use crate::{
-    error::{Error, Result, ResultExt},
+    error::{Error, Result},
     events::{Event, Progress},
     scheduler::SchedulerCmd,
 };
+use async_broadcast::Receiver as BroadcastReceiver;
+use async_channel::{Receiver, Sender};
 use futures_core::{Stream, future::BoxFuture};
 use futures_util::{FutureExt, future::Shared};
 use std::path::PathBuf;
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
-use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
 type SharedResult = Shared<BoxFuture<'static, Result<DownloadResult>>>;
@@ -20,17 +20,17 @@ type SharedResult = Shared<BoxFuture<'static, Result<DownloadResult>>>;
 /// - Cancellation is cooperative via [Download::cancel()]; the worker aborts the HTTP request and removes any partial file.
 pub struct Download {
     id: Uuid,
-    events: broadcast::Receiver<Event>,
-    progress: watch::Receiver<Progress>,
+    events: BroadcastReceiver<Event>,
+    progress: BroadcastReceiver<Progress>,
     result: SharedResult,
-    cmd_tx: mpsc::Sender<SchedulerCmd>,
+    cmd_tx: Sender<SchedulerCmd>,
 }
 
 impl Clone for Download {
     fn clone(&self) -> Self {
         Self {
             id: self.id,
-            events: self.events.resubscribe(),
+            events: self.events.new_receiver(),
             progress: self.progress.clone(),
             result: self.result.clone(),
             cmd_tx: self.cmd_tx.clone(),
@@ -41,12 +41,12 @@ impl Clone for Download {
 impl Download {
     pub(crate) fn new(
         id: Uuid,
-        events: broadcast::Receiver<Event>,
-        progress: watch::Receiver<Progress>,
-        result: oneshot::Receiver<Result<DownloadResult>>,
-        cmd_tx: mpsc::Sender<SchedulerCmd>,
+        events: BroadcastReceiver<Event>,
+        progress: BroadcastReceiver<Progress>,
+        result: Receiver<Result<DownloadResult>>,
+        cmd_tx: Sender<SchedulerCmd>,
     ) -> Self {
-        let result = async move { result.await.map_err(|_| Error::ManagerShutdown)? }
+        let result = async move { result.recv().await.map_err(|_| Error::ManagerShutdown)? }
             .boxed()
             .shared();
         Download {
@@ -63,27 +63,27 @@ impl Download {
         self.id
     }
 
-    /// Subscribe to the latest progress for this download.
-    pub fn progress(&self) -> watch::Receiver<Progress> {
+    /// Stream progress updates for this download.
+    pub fn progress(&self) -> impl Stream<Item = Progress> + 'static {
         self.progress.clone()
     }
 
     /// Pause this download and wait until its partial state has been preserved.
     pub async fn pause(&self) -> Result<()> {
-        let (ack, result) = oneshot::channel();
+        let (ack, result) = async_channel::bounded(1);
         self.cmd_tx
             .send(SchedulerCmd::Pause { id: self.id, ack })
             .await?;
-        result.await.map_err(|_| Error::ManagerShutdown)?
+        result.recv().await.map_err(|_| Error::ManagerShutdown)?
     }
 
     /// Resume this download and wait until it has been queued to run.
     pub async fn resume(&self) -> Result<()> {
-        let (ack, result) = oneshot::channel();
+        let (ack, result) = async_channel::bounded(1);
         self.cmd_tx
             .send(SchedulerCmd::Resume { id: self.id, ack })
             .await?;
-        result.await.map_err(|_| Error::ManagerShutdown)?
+        result.recv().await.map_err(|_| Error::ManagerShutdown)?
     }
 
     /// Request cancellation and wait for it to take terminal effect.
@@ -109,12 +109,12 @@ impl Download {
     /// Backed by a broadcast channel; lagged consumers may drop messages.
     /// This stream filters events to those whose id matches this handle.
     pub fn events(&self) -> impl Stream<Item = Event> + 'static {
-        use tokio_stream::StreamExt as _;
-
         let download_id = self.id;
-        BroadcastStream::new(self.events.resubscribe())
-            .filter_map(|result| result.log_warn())
-            .filter(move |event| event.id() == download_id)
+        use futures_util::StreamExt as _;
+
+        self.events
+            .new_receiver()
+            .filter(move |event| futures_util::future::ready(event.id() == download_id))
     }
 }
 
@@ -139,73 +139,81 @@ pub struct DownloadResult {
 
 #[cfg(test)]
 mod tests {
+    use futures_util::StreamExt;
+
     use super::*;
 
     fn download(
-        result: oneshot::Receiver<Result<DownloadResult>>,
-        cmd_tx: mpsc::Sender<SchedulerCmd>,
+        result: Receiver<Result<DownloadResult>>,
+        cmd_tx: Sender<SchedulerCmd>,
     ) -> Download {
-        let (_event_tx, event_rx) = broadcast::channel(1);
-        let (_progress_tx, progress_rx) = watch::channel(Progress::new(0, None));
+        let (_event_tx, event_rx) = async_broadcast::broadcast(1);
+        let (_progress_tx, progress_rx) = async_broadcast::broadcast(1);
         Download::new(Uuid::new_v4(), event_rx, progress_rx, result, cmd_tx)
     }
 
     #[test]
     fn progress_returns_latest_value() {
-        let (_event_tx, event_rx) = broadcast::channel(1);
-        let (progress_tx, progress_rx) = watch::channel(Progress::new(0, None));
-        let (_result_tx, result_rx) = oneshot::channel();
-        let (cmd_tx, _cmd_rx) = mpsc::channel(1);
+        let (_event_tx, event_rx) = async_broadcast::broadcast(1);
+        let (mut progress_tx, progress_rx) = async_broadcast::broadcast(1);
+        progress_tx.set_overflow(true);
+        let (_result_tx, result_rx) = async_channel::bounded(1);
+        let (cmd_tx, _cmd_rx) = async_channel::bounded(1);
         let download = Download::new(Uuid::new_v4(), event_rx, progress_rx, result_rx, cmd_tx);
-        let progress_rx = download.progress();
         let mut progress = Progress::new(0, Some(100));
         progress.add(40);
 
-        progress_tx.send_replace(progress);
+        progress_tx.try_broadcast(progress).unwrap();
+        let progress = futures_lite::future::block_on(download.progress().next()).unwrap();
 
-        assert_eq!(progress_rx.borrow().bytes_downloaded(), 40);
-        assert_eq!(progress_rx.borrow().total_bytes(), Some(100));
+        assert_eq!(progress.bytes_downloaded(), 40);
+        assert_eq!(progress.total_bytes(), Some(100));
     }
 
-    #[tokio::test]
-    async fn clones_share_terminal_result() {
-        let (result_tx, result_rx) = oneshot::channel();
-        let (cmd_tx, _cmd_rx) = mpsc::channel(1);
-        let first = download(result_rx, cmd_tx);
-        let second = first.clone();
-        let path = PathBuf::from("shared-result.bin");
+    #[test]
+    fn clones_share_terminal_result() {
+        futures_lite::future::block_on(async {
+            let (result_tx, result_rx) = async_channel::bounded(1);
+            let (cmd_tx, _cmd_rx) = async_channel::bounded(1);
+            let first = download(result_rx, cmd_tx);
+            let second = first.clone();
+            let path = PathBuf::from("shared-result.bin");
 
-        result_tx
-            .send(Ok(DownloadResult {
-                path: path.clone(),
-                bytes_downloaded: 42,
-            }))
-            .unwrap();
-        let (first, second) = tokio::join!(first, second);
-        let first = first.unwrap();
-        let second = second.unwrap();
+            result_tx
+                .send(Ok(DownloadResult {
+                    path: path.clone(),
+                    bytes_downloaded: 42,
+                }))
+                .await
+                .unwrap();
+            let (first, second) = futures_util::join!(first, second);
+            let first = first.unwrap();
+            let second = second.unwrap();
 
-        assert_eq!(first.path, path);
-        assert_eq!(second.path, path);
-        assert_eq!(first.bytes_downloaded, 42);
-        assert_eq!(second.bytes_downloaded, 42);
-    }
-
-    #[tokio::test]
-    async fn cancel_waits_for_terminal_cancellation_result() {
-        let (result_tx, result_rx) = oneshot::channel();
-        let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
-        let download = download(result_rx, cmd_tx);
-        let id = download.id();
-        let responder = tokio::spawn(async move {
-            let Some(SchedulerCmd::Cancel { id: cancelled_id }) = cmd_rx.recv().await else {
-                panic!("expected cancel command");
-            };
-            assert_eq!(cancelled_id, id);
-            let _ = result_tx.send(Err(Error::Cancelled));
+            assert_eq!(first.path, path);
+            assert_eq!(second.path, path);
+            assert_eq!(first.bytes_downloaded, 42);
+            assert_eq!(second.bytes_downloaded, 42);
         });
+    }
 
-        assert!(download.cancel().await.is_ok());
-        responder.await.unwrap();
+    #[test]
+    fn cancel_waits_for_terminal_cancellation_result() {
+        futures_lite::future::block_on(async {
+            let (result_tx, result_rx) = async_channel::bounded(1);
+            let (cmd_tx, cmd_rx) = async_channel::bounded(1);
+            let download = download(result_rx, cmd_tx);
+            let id = download.id();
+            let responder = async move {
+                let SchedulerCmd::Cancel { id: cancelled_id } = cmd_rx.recv().await.unwrap() else {
+                    panic!("expected cancel command");
+                };
+                assert_eq!(cancelled_id, id);
+                let _ = result_tx.send(Err(Error::Cancelled)).await;
+            };
+
+            let (result, ()) = futures_util::join!(download.cancel(), responder);
+            assert!(result.is_ok());
+        });
     }
 }

@@ -1,96 +1,57 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use download_manager::prelude::*;
 use futures_util::StreamExt;
-use reqwest::Url;
-// use std::fmt::Debug;
-use tracing::{error, info};
-use tracing_subscriber::EnvFilter;
+use http::{Response, header};
+use http_client::{MockClient, body};
+use tracing::info;
+use url::Url;
 
-fn init_tracing() {
-    // Configure logs via RUST_LOG if provided, else use a sensible default.
-    if std::env::var_os("RUST_LOG").is_none() {
-        // Show info logs globally and debug logs for this crate
-        unsafe {
-            std::env::set_var("RUST_LOG", "info,download_manager=debug");
-        }
-    }
+// Production callers construct the backend under an entered Tokio context:
+//
+// let _guard = handle.enter();
+// let http = Arc::new(http_client::ReqwestClient::new()?);
+// let (manager, scheduler) = DownloadManager::new(http, config);
+// tokio::spawn(scheduler);
 
-    let filter = EnvFilter::from_default_env();
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .compact()
-        .init();
-}
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt().compact().init();
+    let executor = async_executor::Executor::new();
 
-#[tokio::main]
-async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    init_tracing();
+    futures_lite::future::block_on(executor.run(async {
+        let http = Arc::new(MockClient::new(|_| {
+            Ok(Response::builder()
+                .header(header::CONTENT_LENGTH, 13)
+                .body(body("hello, world!"))?)
+        }));
+        let (manager, scheduler) = DownloadManager::new(http, DownloadManagerConfig::default());
+        let scheduler = executor.spawn(scheduler);
 
-    let manager = DownloadManager::default();
+        let destination = PathBuf::from("example-download.bin");
+        let download = manager.download(Url::parse("https://example.com/file")?, &destination)?;
+        let mut events = download.events();
+        let mut progress = download.progress();
+        let event_task = executor.spawn(async move {
+            while let Some(event) = events.next().await {
+                info!(%event);
+            }
+        });
+        let progress_task = executor.spawn(async move {
+            while let Some(progress) = progress.next().await {
+                info!(
+                    bytes = progress.bytes_downloaded(),
+                    total = ?progress.total_bytes(),
+                );
+            }
+        });
 
-    let url = Url::parse("https://ash-speed.hetzner.com/100MB.bin")?;
-    let destination: PathBuf = "example-download.bin".into();
+        let result = download.await?;
+        info!(path = %result.path.display(), bytes = result.bytes_downloaded);
+        manager.shutdown().await;
+        scheduler.await;
+        event_task.await;
+        progress_task.await;
 
-    // Start the download
-    let download = manager.download(url, &destination)?;
-
-    // Subscribe to per-download events
-    let mut event_stream = download.events();
-    tokio::spawn(async move {
-        while let Some(ev) = event_stream.next().await {
-            // Event implements Display; we also log structured data above via tracing in the library.
-            info!(event = %ev, "event");
-        }
-    });
-
-    let mut progress = download.progress();
-    tokio::spawn(async move {
-        while progress.changed().await.is_ok() {
-            let progress = *progress.borrow_and_update();
-            info!(
-                bytes = progress.bytes_downloaded(),
-                total = ?progress.total_bytes(),
-                bytes_per_second = progress.bytes_per_second(),
-                "progress"
-            );
-        }
-    });
-
-    // Optionally, you can also subscribe to global events across all downloads:
-    // let mut global_events = manager.events();
-    // tokio::spawn(async move {
-    //     while let Some(ev) = global_events.next().await {
-    //         info!(event = %ev, "global_event");
-    //     }
-    // });
-
-    // Await the result (the handle implements Future)
-    match download.await {
-        Ok(result) => {
-            info!(
-                path = %result.path.display(),
-                bytes = result.bytes_downloaded,
-                "download completed"
-            );
-        }
-        Err(err) => {
-            error!(error = %err, "download failed");
-        }
-    }
-
-    // Graceful shutdown (waits for any background tasks to finish)
-    manager.shutdown().await;
-
-    Ok(())
-    // To test cancellation, you could do:
-    // let id = download.id();
-    // tokio::spawn({
-    //     let manager = manager.clone();
-    //     async move {
-    //         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    //         let _ = manager.cancel(id).await;
-    //     }
-    // });
+        Ok(())
+    }))
 }

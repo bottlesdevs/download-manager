@@ -169,7 +169,7 @@ impl DownloadManager {
     /// - Prevents new tasks from being scheduled and waits for all worker tasks to finish.
     /// Call this before dropping the manager if you need deterministic teardown.
     #[instrument(level = "info", skip(self))]
-    pub async fn shutdown(self) {
+    pub async fn shutdown(&self) {
         info!("Shutting down DownloadManager");
         self.ctx.cancel_root.cancel();
         let _ = self.done.recv().await;

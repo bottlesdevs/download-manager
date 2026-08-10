@@ -12,6 +12,6 @@ pub mod prelude {
     pub use super::download::{Download, DownloadResult};
     pub use super::error::Error;
     pub use super::events::{Event, Progress};
-    pub use super::manager::{DownloadManager, DownloadManagerConfig, SchedulerFuture};
+    pub use super::manager::{DownloadManager, DownloadManagerConfig};
     pub use super::request::{Request, RequestBuilder};
 }

@@ -8,8 +8,7 @@ use crate::{
 };
 use async_channel::{Receiver, Sender};
 use derive_builder::Builder;
-use futures_core::{Stream, future::BoxFuture};
-use futures_util::FutureExt;
+use futures_core::Stream;
 use http_client::HttpClient;
 use std::{num::NonZeroUsize, path::Path, sync::Arc};
 use tracing::{info, instrument};
@@ -38,41 +37,23 @@ impl Drop for DownloadManager {
     }
 }
 
-/// Scheduler loop returned by [`DownloadManager::new`].
-///
-/// The caller must spawn or otherwise poll this future.
-#[must_use = "the download scheduler must be spawned or polled"]
-pub struct SchedulerFuture(BoxFuture<'static, ()>);
-
-impl std::future::Future for SchedulerFuture {
-    type Output = ();
-
-    fn poll(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        self.get_mut().0.as_mut().poll(cx)
-    }
-}
-
 impl DownloadManager {
-    /// Create a manager and its executor-independent scheduler future.
+    /// Create a manager and start its scheduler on a private thread.
     #[instrument(level = "info", skip(client, config))]
     pub fn new(
         client: Arc<dyn HttpClient>,
         config: DownloadManagerConfig,
-    ) -> (DownloadManager, SchedulerFuture) {
+    ) -> Result<DownloadManager> {
         let (cmd_tx, cmd_rx) = async_channel::bounded(1024);
         let (done_tx, done) = async_channel::bounded(1);
         let ctx = Context::new(client);
         let scheduler = Scheduler::new(config.max_concurrent, ctx.clone(), cmd_rx);
-        let scheduler = SchedulerFuture(
-            async move {
-                scheduler.run().await;
-                let _ = done_tx.send(()).await;
-            }
-            .boxed(),
-        );
+        let _ = std::thread::Builder::new()
+            .name("download-manager".into())
+            .spawn(move || {
+                async_io::block_on(scheduler.run());
+                let _ = done_tx.try_send(());
+            })?;
 
         let manager = DownloadManager {
             scheduler_tx: cmd_tx,
@@ -85,7 +66,7 @@ impl DownloadManager {
             "DownloadManager initialized"
         );
 
-        (manager, scheduler)
+        Ok(manager)
     }
 
     /// Start a download with default request settings.
@@ -206,34 +187,48 @@ mod tests {
 
     #[test]
     fn dropping_manager_stops_scheduler() {
-        let executor = async_executor::Executor::new();
-        futures_lite::future::block_on(executor.run(async {
-            let (manager, scheduler) =
-                DownloadManager::new(mock(), DownloadManagerConfig::default());
-            let context = Arc::downgrade(&manager.ctx);
-            let scheduler = executor.spawn(scheduler);
+        let manager = DownloadManager::new(mock(), DownloadManagerConfig::default()).unwrap();
+        let context = Arc::downgrade(&manager.ctx);
+        let done = manager.done.clone();
 
-            drop(manager);
-            scheduler.await;
+        drop(manager);
+        futures_lite::future::block_on(done.recv()).unwrap();
 
-            assert!(context.upgrade().is_none());
-        }));
+        assert!(context.upgrade().is_none());
     }
 
     #[test]
     fn concurrency_limit_can_be_changed_at_runtime() {
-        let executor = async_executor::Executor::new();
-        futures_lite::future::block_on(executor.run(async {
-            let (manager, scheduler) =
-                DownloadManager::new(mock(), DownloadManagerConfig::default());
-            let scheduler = executor.spawn(scheduler);
+        futures_lite::future::block_on(async {
+            let manager = DownloadManager::new(mock(), DownloadManagerConfig::default()).unwrap();
 
             manager
                 .set_max_concurrent(NonZeroUsize::new(5).unwrap())
                 .await
                 .unwrap();
             manager.shutdown().await;
-            scheduler.await;
-        }));
+        });
+    }
+
+    #[test]
+    fn downloads_run_without_an_external_executor() {
+        futures_lite::future::block_on(async {
+            let manager = DownloadManager::new(mock(), DownloadManagerConfig::default()).unwrap();
+            let destination =
+                std::env::temp_dir().join(format!("dm-manager-test-{}", Uuid::new_v4()));
+
+            let result = manager
+                .download(
+                    Url::parse("https://example.com/file").unwrap(),
+                    &destination,
+                )
+                .unwrap()
+                .await
+                .unwrap();
+
+            assert_eq!(result.path, destination);
+            manager.shutdown().await;
+            std::fs::remove_file(destination).unwrap();
+        });
     }
 }

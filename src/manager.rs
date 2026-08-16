@@ -48,10 +48,14 @@ impl DownloadManager {
         let (done_tx, done) = async_channel::bounded(1);
         let ctx = Context::new(client);
         let scheduler = Scheduler::new(config.max_concurrent, ctx.clone(), cmd_rx);
+        let runtime = tokio::runtime::Handle::try_current().ok();
         let _ = std::thread::Builder::new()
             .name("download-manager".into())
             .spawn(move || {
-                async_io::block_on(scheduler.run());
+                match runtime {
+                    Some(runtime) => runtime.block_on(scheduler.run()),
+                    None => async_io::block_on(scheduler.run()),
+                }
                 let _ = done_tx.try_send(());
             })?;
 

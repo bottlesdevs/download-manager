@@ -13,5 +13,5 @@ pub mod prelude {
     pub use super::error::Error;
     pub use super::events::{Event, Progress};
     pub use super::manager::{DownloadManager, DownloadManagerConfig};
-    pub use super::request::{Request, RequestBuilder};
+    pub use super::request::{ChunkSource, Request, RequestBuilder, Source};
 }

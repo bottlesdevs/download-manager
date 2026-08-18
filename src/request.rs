@@ -6,6 +6,22 @@ use url::Url;
 
 use crate::error::{Error, Result};
 
+/// Where a download's bytes come from: a single URL streamed directly to
+/// the destination, or a list of chunks fetched in order, each optionally
+/// zlib-compressed, and concatenated into the destination as they land.
+#[derive(Debug, Clone)]
+pub enum Source {
+    Simple(Url),
+    Chunked(Vec<ChunkSource>),
+}
+
+/// One chunk of a [`Source::Chunked`] download.
+#[derive(Debug, Clone)]
+pub struct ChunkSource {
+    pub url: Url,
+    pub compressed: bool,
+}
+
 /// Immutable description of a single download request.
 ///
 /// Built by [RequestBuilder] and executed by the scheduler. Holds destination,
@@ -16,7 +32,7 @@ use crate::error::{Error, Result};
 #[builder(build_fn(skip))]
 pub struct Request {
     #[builder(setter(custom))]
-    url: Url,
+    source: Source,
     #[builder(field(ty = "PathBuf"))]
     destination: PathBuf,
     #[builder(field(ty = "DownloadConfigBuilder"))]
@@ -66,18 +82,37 @@ impl Default for DownloadConfig {
 impl Request {
     pub fn builder(url: Url, destination: impl AsRef<Path>) -> RequestBuilder {
         RequestBuilder {
-            url: Some(url),
+            source: Some(Source::Simple(url)),
             destination: destination.as_ref().to_path_buf(),
             config: DownloadConfigBuilder::default(),
         }
     }
 
-    pub fn url(&self) -> &Url {
-        &self.url
+    /// A request whose bytes come from multiple chunks, fetched and
+    /// concatenated in order into `destination`.
+    pub fn chunked_builder(chunks: Vec<ChunkSource>, destination: impl AsRef<Path>) -> RequestBuilder {
+        RequestBuilder {
+            source: Some(Source::Chunked(chunks)),
+            destination: destination.as_ref().to_path_buf(),
+            config: DownloadConfigBuilder::default(),
+        }
+    }
+
+    pub fn source(&self) -> &Source {
+        &self.source
     }
 
     pub fn destination(&self) -> &Path {
         self.destination.as_path()
+    }
+
+    /// Short human-readable description of this request's source, for
+    /// tracing/logging only.
+    pub fn describe(&self) -> String {
+        match &self.source {
+            Source::Simple(url) => url.to_string(),
+            Source::Chunked(chunks) => format!("{} chunk(s)", chunks.len()),
+        }
     }
 }
 
@@ -109,9 +144,9 @@ impl RequestBuilder {
 
     #[instrument(level = "info", skip(self))]
     pub fn build(self) -> Result<Request> {
-        let url = self
-            .url
-            .ok_or_else(|| Error::InvalidRequest("URL must be set".to_string()))?;
+        let source = self
+            .source
+            .ok_or_else(|| Error::InvalidRequest("source must be set".to_string()))?;
         let destination = self.destination;
         let config = self
             .config
@@ -119,8 +154,8 @@ impl RequestBuilder {
             .map_err(|error| Error::InvalidConfig(error.to_string()))?;
 
         Ok(Request {
-            url: url.clone(),
-            destination: destination.clone(),
+            source,
+            destination,
             config,
         })
     }
@@ -144,7 +179,7 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(request.url(), &url());
+        assert!(matches!(request.source(), Source::Simple(u) if u == &url()));
         assert_eq!(request.destination(), Path::new("out.bin"));
         assert_eq!(request.config.retries, 5);
         assert!(request.config.overwrite);

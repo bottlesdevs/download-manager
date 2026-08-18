@@ -8,6 +8,8 @@ async-broadcast.workspace = true
 async-channel.workspace = true
 async-fs.workspace = true
 async-io.workspace = true
+blocking.workspace = true
+flate2.workspace = true
 futures-core.workspace = true
 futures-lite.workspace = true
 futures-util = { workspace = true, features = ["io"] }

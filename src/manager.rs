@@ -211,6 +211,60 @@ mod tests {
     }
 
     #[test]
+    fn chunked_download_concatenates_and_decompresses_in_order() {
+        use crate::request::{ChunkSource, Request};
+        use std::io::Write;
+
+        fn zlib(bytes: &[u8]) -> Vec<u8> {
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(bytes).unwrap();
+            encoder.finish().unwrap()
+        }
+
+        futures_lite::future::block_on(async {
+            let plain_chunk = b"hello ".to_vec();
+            let compressed_chunk = zlib(b"world");
+
+            let client: Arc<dyn HttpClient> = Arc::new(MockClient::new(move |request| {
+                let path = request.uri().path().to_string();
+                let bytes = match path.as_str() {
+                    "/chunk0" => body(plain_chunk.clone()),
+                    "/chunk1" => body(compressed_chunk.clone()),
+                    other => panic!("unexpected chunk request: {other}"),
+                };
+                Ok(Response::builder().status(200).body(bytes)?)
+            }));
+
+            let manager = DownloadManager::new(client, DownloadManagerConfig::default()).unwrap();
+            let destination =
+                std::env::temp_dir().join(format!("dm-chunked-test-{}", Uuid::new_v4()));
+
+            let chunks = vec![
+                ChunkSource {
+                    url: Url::parse("https://example.com/chunk0").unwrap(),
+                    compressed: false,
+                },
+                ChunkSource {
+                    url: Url::parse("https://example.com/chunk1").unwrap(),
+                    compressed: true,
+                },
+            ];
+            let request = Request::chunked_builder(chunks, &destination)
+                .build()
+                .unwrap();
+
+            let result = manager.enqueue(request).unwrap().await.unwrap();
+
+            assert_eq!(result.path, destination);
+            let contents = std::fs::read(&destination).unwrap();
+            assert_eq!(contents, b"hello world");
+            manager.shutdown().await;
+            std::fs::remove_file(destination).unwrap();
+        });
+    }
+
+    #[test]
     fn downloads_run_without_an_external_executor() {
         futures_lite::future::block_on(async {
             let manager = DownloadManager::new(mock(), DownloadManagerConfig::default()).unwrap();

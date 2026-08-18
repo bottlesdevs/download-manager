@@ -120,7 +120,7 @@ impl Scheduler {
         let request = &job.request;
         let id = job.id();
         self.emit(id, EventKind::Queued);
-        debug!(%id, url = %request.url(), destination = ?request.destination(), "Job queued");
+        debug!(%id, source = %request.describe(), destination = ?request.destination(), "Job queued");
         self.jobs.insert(id, job);
         self.ready.push_back(id);
     }
@@ -192,7 +192,7 @@ impl Scheduler {
                 progress_tx,
                 result_tx,
             } => {
-                debug!(%id, url = %request.url(), destination = ?request.destination(), "Enqueue request");
+                debug!(%id, source = %request.describe(), destination = ?request.destination(), "Enqueue request");
                 self.schedule(Job {
                     id,
                     request,
